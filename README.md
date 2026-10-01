@@ -16,6 +16,7 @@
 | `plasma_circuit.py` | RF バイアスのプラズマ等価回路 (シース電圧の波形を求める) |
 | `sheath_ied.py` | 1 次元シースの時間発展 (シース電圧の波形からイオンエネルギー分布を作る) |
 | `trench_charging_gui.py` | Tkinter + matplotlib の GUI (本体を import して使う) |
+| `tests/` | 回帰テストと基準データ (`tests/data/*.npz`) |
 | `pyproject.toml`, `uv.lock` | 依存パッケージの定義とバージョン固定 (uv) |
 
 ## 必要環境
@@ -23,7 +24,7 @@
 依存パッケージは [uv](https://docs.astral.sh/uv/) で管理しています。
 
 ```bash
-uv sync          # .venv を作り、uv.lock のバージョンどおりに numpy / scipy / matplotlib を入れる
+uv sync          # .venv を作り、uv.lock のバージョンどおりに numpy / scipy / matplotlib (と開発用の pytest) を入れる
 ```
 
 `uv run` で実行すれば `uv sync` は自動で行われます。Python は 3.9 以上で、`.python-version` で 3.12 を
@@ -60,6 +61,20 @@ RF バイアスの等価回路と IED (1 次元シース) の結果は `.cache/c
 (1 次元シースは 1 回 5〜40 秒かかるため)。キーは結果に効くパラメーター (回路・プラズマ・ガス・形状) と計算方法の
 バージョン (`plasma_circuit.CACHE_VERSION`) のハッシュで、GUI の「回路の波形…」と実行でも共有します。
 `.cache/` はフォルダごと消してもかまいません (次の計算で作り直します)。
+
+## テスト
+
+```bash
+uv run pytest        # 回帰テスト (30 秒ほど)
+```
+
+`tests/test_regression.py` は、初版 (`c695eb3`) と同じ条件の計算が、初版で作った基準データ `tests/data/*.npz` と
+ビット単位で一致することを確かめます。条件は dc 100 eV・マスクなし・40 バッチで、表面リークなしと `sigma_s` 1e-14 S の
+2 つです (今のコードでは `--bias dc --mask_t 0 --wall_model absorb` に当たります)。
+
+- ビット単位の一致を期待できるのは、基準を作ったのと同じ環境 (OS・CPU・`uv.lock` のバージョン) だけです。
+- 結果が変わる変更を意図して入れたときだけ、変わった理由を確かめたうえで基準を作り直します
+  (`uv run python tests/test_regression.py --regen`)。
 
 ## モデル
 
