@@ -25,7 +25,8 @@
 * 入射条件(上端境界):
     - イオン  : 垂直入射 + 横方向の熱速度 Ti。エネルギーは bias="rf" (既定) なら RF バイアスの
                 プラズマ等価回路 (plasma_circuit.py: RF 電源 → ブロッキングコンデンサ → ウェハ → SiO2 →
-                マスク → シース → プラズマ → シース → 接地) を RF 周期定常まで解いて求めた IED から選ぶ。
+                マスク → シース → プラズマ → シース → 接地) を RF 周期定常まで解き、そのシース電圧で
+                1 次元のシースを時間発展させて求めた IED (sheath_ied.py, ied_model="sheath") から選ぶ。
                 電源の波形は正弦波 (既定) か、負に凸の矩形パルス (rf_wave="pulse", 幅 rf_duty) 。
                 bias="dc" なら全イオンが ion_energy_eV。
                 帯電の時定数 (ms) は RF 周期 (74 ns) よりずっと長いので、IED だけを使う (一方向の連成)。
@@ -117,7 +118,7 @@ class Params:
     c_block: float = 4900e-12  # ブロッキングコンデンサ [F]
     wafer_d: float = 0.3      # ウェハ (電極) の直径 [m]
     wall_ratio: float = 5.0   # 接地側 (壁) の面積 / ウェハの面積
-    ied_model: str = "transit"  # "transit": シース通過時間で平均した IED / "instant": 瞬時のシース電圧
+    ied_model: str = "sheath"  # IED: "sheath" (1 次元シースの時間発展) / "transit" (通過時間で平均) / "instant"
     # ---- 表面リーク ----
     sigma_s: float = 1e-15    # 表面シート伝導度 [S] (0=リークなし)。目安: 1e-16〜1e-13
     #                           導電性マスクでは、マスク境目の電荷を逃がすため 0 より大きくする
@@ -504,6 +505,8 @@ def run(p, log=print, progress=None, stop=None):
         log(f"表面リーク ON: sigma_s={p.sigma_s:g} S, 表面セル数 {leak['flat'].size}")
     circuit, ion_energy = None, None
     if p.bias == "rf":
+        if p.ied_model == "sheath":
+            log("RF バイアスの等価回路と 1 次元シースを計算しています (数〜20 秒)…")
         circuit = PC.solve_circuit(p)
         ion_energy = PC.ion_energy_sampler(circuit)
         log(f"RF バイアスの電源: {PC.source_label(p)}, C_b {p.c_block*1e12:g} pF, "

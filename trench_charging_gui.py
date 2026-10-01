@@ -609,6 +609,12 @@ class App(tk.Tk):
                     self.status1.set("エラーが発生しました")
                     self._log(payload)
                     messagebox.showerror("計算エラー", payload.splitlines()[-1])
+                elif kind == "circuit":
+                    self.show_circuit(payload)
+                elif kind == "circuit_error":
+                    self.btn_circuit.configure(state="normal")
+                    self._log(payload)
+                    messagebox.showerror("等価回路のエラー", payload.splitlines()[-1])
         except queue.Empty:
             pass
         self._fit_figure()
@@ -675,7 +681,8 @@ class App(tk.Tk):
 
     # ---------------- 等価回路の確認
     def on_circuit(self):
-        """今の入力値で RF バイアスの等価回路を解き、波形と IED を別ウィンドウに表示する。"""
+        """今の入力値で RF バイアスの等価回路を解き、波形と IED を別ウィンドウに表示する。
+        1 次元シースの計算は数〜20 秒かかるので別スレッドで行い、終わったら poll() から show_circuit を呼ぶ。"""
         try:
             p = self.get_params()
             err = validate(p)
@@ -687,11 +694,19 @@ class App(tk.Tk):
         if p.bias != "rf":
             messagebox.showinfo("回路の波形", "バイアスが dc のときは等価回路を使いません (全イオンが同じエネルギー)。")
             return
+        self.btn_circuit.configure(state="disabled")
+        self._log(f"回路の波形: {PC.source_label(p)} の等価回路と IED ({p.ied_model}) を計算しています…")
+        threading.Thread(target=self._circuit_work, args=(p,), daemon=True).start()
+
+    def _circuit_work(self, p):
+        """ワーカースレッド。Tk には触らず、queue 経由で結果を渡す。"""
         try:
-            c = PC.solve_circuit(p)
-        except (RuntimeError, ValueError) as e:
-            messagebox.showerror("等価回路のエラー", str(e))
-            return
+            self.q.put(("circuit", PC.solve_circuit(p)))
+        except Exception:
+            self.q.put(("circuit_error", traceback.format_exc()))
+
+    def show_circuit(self, c):
+        self.btn_circuit.configure(state="normal")
         win = tk.Toplevel(self)
         win.title("RF バイアスの等価回路")
         fig = Figure(figsize=(11, 4.2), dpi=100, constrained_layout=True)
