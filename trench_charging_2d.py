@@ -26,6 +26,7 @@
     - イオン  : 垂直入射 + 横方向の熱速度 Ti。エネルギーは bias="rf" (既定) なら RF バイアスの
                 プラズマ等価回路 (plasma_circuit.py: RF 電源 → ブロッキングコンデンサ → ウェハ → SiO2 →
                 マスク → シース → プラズマ → シース → 接地) を RF 周期定常まで解いて求めた IED から選ぶ。
+                電源の波形は正弦波 (既定) か、負に凸の矩形パルス (rf_wave="pulse", 幅 rf_duty) 。
                 bias="dc" なら全イオンが ion_energy_eV。
                 帯電の時定数 (ms) は RF 周期 (74 ns) よりずっと長いので、IED だけを使う (一方向の連成)。
     - 電子    : 温度 Te のマクスウェル分布のフラックス分布(等方的)
@@ -50,6 +51,7 @@
     uv run trench_charging_2d.py --mask_t 40     # マスク厚 40 セル = 200 nm (0 でマスクなし)
     uv run trench_charging_2d.py --mask_type dielectric --mask_eps_r 3.0  # 絶縁性のマスク
     uv run trench_charging_2d.py --rf_freq 2e6 --rf_volt 150  # RF バイアスの周波数 [Hz] と振幅 [V]
+    uv run trench_charging_2d.py --rf_wave pulse --rf_freq 1e6 --rf_duty 0.1  # 負の矩形パルス (幅 10%)
     uv run trench_charging_2d.py --bias dc       # RF 回路を使わず、全イオンを ion_energy_eV にする
     uv run trench_charging_2d.py --help          # 変更できるパラメータ一覧
 
@@ -108,7 +110,10 @@ class Params:
     # ---- RF バイアス (プラズマ等価回路, plasma_circuit.py) ----
     bias: str = "rf"          # "rf": 等価回路のシース電圧から IED を作る / "dc": 全イオンが ion_energy_eV
     rf_freq: float = 13.56e6  # RF 周波数 [Hz]
-    rf_volt: float = 100.0    # RF 電源の振幅 [V]
+    rf_volt: float = 100.0    # RF 電源の振幅 [V] (pulse ではパルスの高さ)
+    rf_wave: str = "sine"     # RF 電源の波形: "sine" (正弦波) / "pulse" (0 V から -rf_volt へ下がる負の矩形パルス)
+    rf_duty: float = 0.1      # pulse: パルス幅 (半分の高さで測る) の周期に対する割合
+    rf_rise: float = 1e-9     # pulse: 立ち下がり・立ち上がりの時間 [s]
     c_block: float = 4900e-12  # ブロッキングコンデンサ [F]
     wafer_d: float = 0.3      # ウェハ (電極) の直径 [m]
     wall_ratio: float = 5.0   # 接地側 (壁) の面積 / ウェハの面積
@@ -501,7 +506,7 @@ def run(p, log=print, progress=None, stop=None):
     if p.bias == "rf":
         circuit = PC.solve_circuit(p)
         ion_energy = PC.ion_energy_sampler(circuit)
-        log(f"RF {p.rf_freq/1e6:g} MHz, 振幅 {p.rf_volt:g} V, C_b {p.c_block*1e12:g} pF, "
+        log(f"RF バイアスの電源: {PC.source_label(p)}, C_b {p.c_block*1e12:g} pF, "
             f"ウェハ {p.wafer_d*1e3:g} mm, 壁/ウェハ面積比 {p.wall_ratio:g}")
         log(PC.summary(circuit))
     log(f"1 マクロ粒子 = 実粒子 {w_real:.1f} 個/m,  1 バッチ = {p.dt_batch*1e6:.2f} μs")
@@ -770,7 +775,8 @@ def save_results(res, p, out, pyplot=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    choices = {"mask_type": MASK_TYPES, "bias": PC.BIAS_TYPES, "ied_model": PC.IED_MODELS}
+    choices = {"mask_type": MASK_TYPES, "bias": PC.BIAS_TYPES, "rf_wave": PC.WAVE_TYPES,
+               "ied_model": PC.IED_MODELS}
     for k, v in asdict(Params()).items():
         if isinstance(v, bool):
             ap.add_argument(f"--{k}", action="store_true", default=v)

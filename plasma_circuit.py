@@ -7,8 +7,15 @@ RF バイアスのプラズマ等価回路 (集中定数モデル)
 Yu et al., Plasma Sources Sci. Technol. 31, 035012 (2022) の従来型の等価回路 (Fig. 4(b)) を基に、
 ブロッキングコンデンサとウェハ上の膜 (SiO2 + マスク) を直列に入れた回路を解く:
 
-    RF 電源 Vrf sin(2πft) ─ C_b ─ ウェハ (Si) ─ C_stack (SiO2 [+ 誘電体マスク]) ─ 表面 (マスク)
+    RF 電源 u_s(t) ─ C_b ─ ウェハ (Si) ─ C_stack (SiO2 [+ 誘電体マスク]) ─ 表面 (マスク)
         ─ ウェハ側シース ─ プラズマ ─ 壁側シース (面積はウェハの wall_ratio 倍) ─ 接地
+
+* RF 電源の波形 (rf_wave):
+    sine : u_s = Vrf sin(2πft)
+    pulse: 0 V から -Vrf へ下がる矩形パルス (負に凸)。パルス幅 (半分の高さで測る) は rf_duty × 周期、
+           立ち下がり・立ち上がりは rf_rise の直線。C_b が直流を切るので、0 V の基準の位置は結果に関係しない。
+  1 周期を電源電圧がなめらかな区間 (パルスならエッジとその間) に分けて区間ごとに積分するので、
+  硬い ODE でもエッジで崩れない。
 
 * シースは 3 つの要素の並列:
     イオン電流源      I_i = e Γ_i A              (Γ_i = Params.flux, Bohm フラックス)
@@ -38,6 +45,7 @@ M_E = 9.1093837015e-31       # [kg]
 AMU = 1.66053906660e-27      # [kg]
 
 BIAS_TYPES = ("rf", "dc")             # bias の選択肢 (dc: 全イオンが ion_energy_eV)
+WAVE_TYPES = ("sine", "pulse")        # rf_wave の選択肢 (pulse: 負に凸の矩形パルス)
 IED_MODELS = ("transit", "instant")   # ied_model の選択肢
 
 
@@ -69,8 +77,39 @@ def _electron_current(V, A, el):
     return el["J_e"] * A * np.exp(np.minimum(-V / el["Te"], 60.0))
 
 
-def _rhs(el, Vrf, w):
-    """状態 x = (q, V1) の時間微分を返す関数。
+def source_segments(p):
+    """RF 電源の 1 周期を、電圧がなめらかな区間に分けたリスト [(t0, t1, u_s(t), du_s/dt(t)), ...] を返す
+    (t は周期の始まりからの時刻)。pulse は 立ち下がり → -Vrf → 立ち上がり → 0 V の 4 区間。"""
+    if p.rf_wave not in WAVE_TYPES:
+        raise ValueError(f"rf_wave は {' / '.join(WAVE_TYPES)} のどちらかにしてください: {p.rf_wave!r}")
+    T = 1.0 / p.rf_freq
+    V = p.rf_volt
+    if p.rf_wave == "sine":
+        w = 2 * np.pi * p.rf_freq
+        return [(0.0, T, lambda t: V * np.sin(w * t), lambda t: V * w * np.cos(w * t))]
+    D, tr = p.rf_duty, p.rf_rise
+    if not 0 < D < 1:
+        raise ValueError(f"rf_duty (パルス幅の割合) は 0 より大きく 1 より小さくしてください: {D}")
+    if not 0 < tr <= min(D, 1 - D) * T:
+        raise ValueError(f"rf_rise (立ち上がり時間) は 0 より大きく、パルス幅とパルスの間隔 "
+                         f"({min(D, 1 - D) * T * 1e9:.3g} ns) 以下にしてください: {tr * 1e9:.3g} ns")
+    knots = [0.0, tr, D * T, D * T + tr, T]          # 半分の高さで測ったパルス幅が D T になる
+    levels = [0.0, -V, -V, 0.0, 0.0]
+    return [(a, b, (lambda t, a=a, ua=ua, k=(ub - ua) / (b - a): ua + k * (t - a)),
+             (lambda t, k=(ub - ua) / (b - a): k))
+            for a, b, ua, ub in zip(knots[:-1], knots[1:], levels[:-1], levels[1:]) if b > a]
+
+
+def source_label(p):
+    """ログ・表示用の電源波形の説明。"""
+    if p.rf_wave == "pulse":
+        return (f"負のパルス {p.rf_freq/1e6:g} MHz, 高さ {p.rf_volt:g} V, 幅 {p.rf_duty*100:g}%, "
+                f"立ち上がり {p.rf_rise*1e9:g} ns")
+    return f"正弦波 {p.rf_freq/1e6:g} MHz, 振幅 {p.rf_volt:g} V"
+
+
+def _rhs(el, us_f, dus_f):
+    """状態 x = (q, V1) の時間微分を返す関数 (us_f, dus_f: 電源電圧とその時間微分)。
     KVL を時間微分した式から直列電流 i を求める:
         C0 dV0/dt = i - (I_e0 - I_i0),  C1 dV1/dt = (I_e1 - I_i1) - i,  dV0/dt = du_s/dt - i / C_s + dV1/dt"""
     A1, A0, C_s = el["A1"], el["A0"], el["C_s"]
@@ -78,7 +117,7 @@ def _rhs(el, Vrf, w):
 
     def rhs(t, x):
         q, V1 = x
-        us, dus = Vrf * np.sin(w * t), Vrf * w * np.cos(w * t)
+        us, dus = us_f(t), dus_f(t)
         V0 = us - q / C_s + V1
         C1, C0 = _sheath_cap(V1, A1, el), _sheath_cap(V0, A0, el)
         d1 = _electron_current(V1, A1, el) - I_i1     # ウェハ側シースの (電子 - イオン) 電流
@@ -88,7 +127,7 @@ def _rhs(el, Vrf, w):
     return rhs
 
 
-def solve_circuit(p, n_phase=1024, max_periods=3000):
+def solve_circuit(p, n_phase=4096, max_periods=3000):
     """RF 周期定常まで回路を解き、1 周期分の波形と IED を dict で返す。
     t: 位相 0 からの時刻 [s], us/uw/um/up: RF 電源・ウェハ・表面 (マスク)・プラズマの電位 [V],
     V1: ウェハ側シース電圧 [V], i: 直列電流 [A], E: シースに入った時刻ごとのイオンエネルギー [eV]"""
@@ -98,31 +137,42 @@ def solve_circuit(p, n_phase=1024, max_periods=3000):
     Te = el["Te"]
     w = 2 * np.pi * p.rf_freq
     T = 1.0 / p.rf_freq
-    rhs = _rhs(el, p.rf_volt, w)
+    segs = [(a, b, us_f, _rhs(el, us_f, dus_f)) for a, b, us_f, dus_f in source_segments(p)]
     atol = [1e-9 * el["C_s"], 1e-7]                 # q [C], V1 [V]
+
+    def one_period(x, t_out=None, tight=False):
+        """1 周期を区間ごとに積分し、周期の終わりの状態と、t_out (周期内の時刻) での状態を返す。"""
+        ys = []
+        for a, b, _, rhs in segs:
+            te = None if t_out is None else np.append(t_out[(t_out >= a) & (t_out < b)], b)
+            sol = solve_ivp(rhs, (a, b), x, method="LSODA", t_eval=te,
+                            rtol=1e-9 if tight else 1e-7, atol=[v / 100 for v in atol] if tight else atol)
+            if not sol.success:
+                raise RuntimeError(f"等価回路の積分に失敗しました: {sol.message}")
+            x = sol.y[:, -1]
+            if t_out is not None:
+                ys.append(sol.y[:, :-1])
+        return x, (np.hstack(ys) if ys else None)
 
     x = np.array([0.0, Te])
     for k in range(max_periods):
-        sol = solve_ivp(rhs, (k * T, (k + 1) * T), x, method="LSODA", rtol=1e-7, atol=atol)
-        if not sol.success:
-            raise RuntimeError(f"等価回路の積分に失敗しました: {sol.message}")
-        dq, dV = np.abs(sol.y[:, -1] - x)
-        x = sol.y[:, -1]
+        x_new, _ = one_period(x)
+        dq, dV = np.abs(x_new - x)
+        x = x_new
         if k >= 3 and dq < 1e-6 * el["C_b"] and dV < 1e-4:   # 1 周期での変化が C_b で 1 μV, V1 で 0.1 mV 未満
             break
     else:
         raise RuntimeError(f"等価回路が {max_periods} 周期で周期定常になりませんでした")
 
     t = np.arange(n_phase) * T / n_phase
-    sol = solve_ivp(rhs, (0.0, T), x, method="LSODA", rtol=1e-9, atol=[a / 100 for a in atol], t_eval=t)
-    if not sol.success:
-        raise RuntimeError(f"等価回路の積分に失敗しました: {sol.message}")
-    q, V1 = sol.y
-    us = p.rf_volt * np.sin(w * t)
+    _, y = one_period(x, t_out=t, tight=True)
+    q, V1 = y
+    seg_of = np.searchsorted([b for _, b, _, _ in segs], t, side="right")   # 各時刻が属する区間
+    us = np.array([segs[j][2](tt) for j, tt in zip(seg_of, t)])
     uw = us - q / el["C_b"]                         # ウェハ (Si)
     um = uw - q / el["C_stack"]                     # 表面 (マスク)
     up = um + V1                                    # プラズマ (= 壁側シース電圧)
-    i = np.array([rhs(tt, xx)[0] for tt, xx in zip(t, sol.y.T)])
+    i = np.array([segs[j][3](tt, xx)[0] for j, tt, xx in zip(seg_of, t, y.T)])
 
     # イオンエネルギー: シース通過時間での平均 (一次遅れ) または瞬時値
     V1m = V1.mean()
@@ -167,7 +217,7 @@ def plot_circuit(c, ax_wave, ax_ied):
     ax_wave.set_xlabel("time in one RF period [ns]")
     ax_wave.set_ylabel("potential [V]")
     ax_wave.set_title("Equivalent circuit (periodic steady state)", fontsize=10)
-    ax_wave.legend(fontsize=7, loc="lower left")
+    ax_wave.legend(fontsize=7, loc="best")
     ax_wave.grid(alpha=0.3)
 
     E = c["E"]
@@ -175,6 +225,9 @@ def plot_circuit(c, ax_wave, ax_ied):
     ax_ied.hist(E, bins=bins, density=True, color=colors[0], alpha=0.85)
     ax_ied.axvline(E.mean(), color="0.3", ls="--", lw=1)
     ax_ied.text(E.mean(), ax_ied.get_ylim()[1] * 0.95, f" mean {E.mean():.0f} eV", fontsize=8, va="top")
+    mid = (E.min() + E.max()) / 2
+    ax_ied.text(0.98, 0.80, f"ions above {mid:.0f} eV: {(E > mid).mean() * 100:.0f}%", transform=ax_ied.transAxes,
+                ha="right", fontsize=8, color="0.3")
     ax_ied.set_xlabel("ion energy [eV]")
     ax_ied.set_ylabel("probability density [1/eV]")
     ax_ied.set_title(f"IED (ion transit {c['tau_i']*1e9:.0f} ns)", fontsize=10)

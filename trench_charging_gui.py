@@ -66,14 +66,18 @@ PLASMA = [
 ]
 RF = [
     ("bias", "バイアス (rf: 等価回路)", "", 1, PC.BIAS_TYPES),
+    ("rf_wave", "波形 (pulse: 負のパルス)", "", 1, PC.WAVE_TYPES),
     ("rf_freq", "RF 周波数", "MHz", 1e6, float),
-    ("rf_volt", "RF 振幅", "V", 1, float),
+    ("rf_volt", "振幅 / パルスの高さ", "V", 1, float),
+    ("rf_duty", "パルス幅 (周期に対する割合)", "%", 0.01, float),
+    ("rf_rise", "パルスの立ち上がり時間", "ns", 1e-9, float),
     ("c_block", "ブロッキングコンデンサ", "pF", 1e-12, float),
     ("wafer_d", "ウェハ直径", "mm", 1e-3, float),
     ("wall_ratio", "壁 / ウェハの面積比", "", 1, float),
     ("ied_model", "IED のモデル", "", 1, PC.IED_MODELS),
 ]
 RF_KEYS = {f[0] for f in RF} - {"bias"}
+PULSE_KEYS = {"rf_duty", "rf_rise"}
 LEAK = [
     ("sigma_s", "表面シート伝導度 (0=なし)", "S", 1, float),
 ]
@@ -131,7 +135,13 @@ def validate(p):
     if p.bias == "rf" and min(p.rf_freq, p.c_block, p.wafer_d, p.wall_ratio) <= 0:
         return "RF 周波数・ブロッキングコンデンサ・ウェハ直径・面積比は正の値にしてください。"
     if p.bias == "rf" and p.rf_volt < 0:
-        return "RF 振幅は 0 以上にしてください。"
+        return "RF 振幅 (パルスの高さ) は 0 以上にしてください。"
+    if p.bias == "rf" and p.rf_wave == "pulse":
+        if not 0 < p.rf_duty < 1:
+            return "パルス幅は 0% より大きく 100% より小さくしてください。"
+        if not 0 < p.rf_rise <= min(p.rf_duty, 1 - p.rf_duty) / p.rf_freq:
+            return (f"パルスの立ち上がり時間は 0 より大きく、パルス幅とパルスの間隔 "
+                    f"({min(p.rf_duty, 1 - p.rf_duty) / p.rf_freq * 1e9:.3g} ns) 以下にしてください。")
     if p.n_per_batch < 100 or p.dt_batch <= 0:
         return "1バッチの粒子数は 100 以上、物理時間は正の値にしてください。"
     if not (0 < p.cfl <= 1) or p.max_steps < 100:
@@ -486,6 +496,9 @@ class App(tk.Tk):
                 st = "normal" if steady else "disabled"
             elif key == "mask_eps_r":
                 st = "normal" if self.vars["mask_type"].get() == "dielectric" else "disabled"
+            elif key in PULSE_KEYS:
+                st = "normal" if (self.vars["bias"].get() == "rf"
+                                  and self.vars["rf_wave"].get() == "pulse") else "disabled"
             elif key in RF_KEYS:
                 st = "normal" if self.vars["bias"].get() == "rf" else "disabled"
             elif key == "ion_energy_eV":
@@ -516,8 +529,8 @@ class App(tk.Tk):
         else:
             lines.append("マスクなし")
         if p.bias == "rf":
-            lines.append(f"RF {p.rf_freq / 1e6:g} MHz・{p.rf_volt:g} V (C_b {p.c_block * 1e12:g} pF, "
-                         f"ウェハ {p.wafer_d * 1e3:g} mm): IED は「回路の波形…」で確認")
+            lines.append(f"RF バイアス: {PC.source_label(p)} (C_b {p.c_block * 1e12:g} pF, "
+                         f"ウェハ {p.wafer_d * 1e3:g} mm)。IED は「回路の波形…」で確認")
         elif p.ion_energy_eV > 0 and p.ion_temp_eV >= 0:
             lines.append(f"イオン角度広がり ≈ {np.degrees(np.sqrt(p.ion_temp_eV / (2 * p.ion_energy_eV))):.1f}°")
         if p.until_steady:
