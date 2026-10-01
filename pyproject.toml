@@ -1,0 +1,11 @@
+[project]
+name = "trench01"
+version = "0.1.0"
+description = "トレンチ構造の表面帯電 2D シミュレーター (CLI + Tkinter GUI)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "matplotlib>=3.5",
+    "numpy>=1.22",
+    "scipy>=1.8",
+]

@@ -12,22 +12,31 @@
 |---|---|
 | `trench_charging_2d.py` | シミュレーション本体 + コマンドライン実行 |
 | `trench_charging_gui.py` | Tkinter + matplotlib の GUI (本体を import して使う) |
+| `pyproject.toml`, `uv.lock` | 依存パッケージの定義とバージョン固定 (uv) |
 
 ## 必要環境
 
-Python 3.9 以上、`pip install -r requirements.txt`。GUI は Tkinter が必要です
-(Linux では `sudo apt install python3-tk`)。
-動作確認: Python 3.12 / numpy 2.4 / scipy 1.17 / matplotlib 3.10
+依存パッケージは [uv](https://docs.astral.sh/uv/) で管理しています。
+
+```bash
+uv sync          # .venv を作り、uv.lock のバージョンどおりに numpy / scipy / matplotlib を入れる
+```
+
+`uv run` で実行すれば `uv sync` は自動で行われます。Python は 3.9 以上で、`.python-version` で 3.12 を
+指定しています (なければ uv が自動で入れます)。GUI には Tkinter が必要です (uv が入れる Python には同梱。
+Linux のシステム Python では `sudo apt install python3-tk`)。
+パッケージの追加は `uv add <名前>`、更新は `uv lock --upgrade` → `uv sync`。
+動作確認: Python 3.12 / numpy 2.5 / scipy 1.18 / matplotlib 3.11
 
 ## 使い方
 
 ```bash
-python trench_charging_gui.py                       # GUI
-python trench_charging_2d.py                        # CLI (既定: 30 ms 分の帯電)
-python trench_charging_2d.py --until_steady         # 飽和帯電まで継続
-python trench_charging_2d.py --sigma_s 1e-14        # 表面リークあり (シート伝導度 [S])
-python trench_charging_2d.py --trench_d 160         # 深さ 160 セル = 800 nm (AR=8)
-python trench_charging_2d.py --help                 # 全パラメータ
+uv run trench_charging_gui.py                       # GUI
+uv run trench_charging_2d.py                        # CLI (既定: 30 ms 分の帯電)
+uv run trench_charging_2d.py --until_steady         # 飽和帯電まで継続
+uv run trench_charging_2d.py --sigma_s 1e-14        # 表面リークあり (シート伝導度 [S])
+uv run trench_charging_2d.py --trench_d 160         # 深さ 160 セル = 800 nm (AR=8)
+uv run trench_charging_2d.py --help                 # 全パラメータ
 ```
 
 CLI の出力は `<out>_fields.png`, `<out>_history.png`, `<out>.npz` です。

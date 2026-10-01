@@ -30,12 +30,14 @@
 
 使い方
 ------
-    python trench_charging_2d.py                 # 既定値で実行 (約4分, 30 ms 分の帯電)
-    python trench_charging_2d.py --batches 60    # 短時間で動作確認
-    python trench_charging_2d.py --trench_d 120  # アスペクト比を変える
-    python trench_charging_2d.py --sigma_s 1e-14 # 表面リークあり (シート伝導度 1e-14 S)
-    python trench_charging_2d.py --until_steady  # 飽和帯電に達するまで継続 (上限 --max_batches)
-    python trench_charging_2d.py --help          # 変更できるパラメータ一覧
+依存パッケージは uv で管理している (pyproject.toml / uv.lock)。uv run が初回に .venv を作る。
+
+    uv run trench_charging_2d.py                 # 既定値で実行 (約4分, 30 ms 分の帯電)
+    uv run trench_charging_2d.py --n_batches 60  # 短時間で動作確認
+    uv run trench_charging_2d.py --trench_d 120  # アスペクト比を変える
+    uv run trench_charging_2d.py --sigma_s 1e-14 # 表面リークあり (シート伝導度 1e-14 S)
+    uv run trench_charging_2d.py --until_steady  # 飽和帯電に達するまで継続 (上限 --max_batches)
+    uv run trench_charging_2d.py --help          # 変更できるパラメータ一覧
 
 飽和まで継続モード (--until_steady)
 ------------------------------------

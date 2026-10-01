@@ -6,7 +6,7 @@
 
 trench_charging_2d.py と同じフォルダに置いて実行する:
 
-    python trench_charging_gui.py
+    uv run trench_charging_gui.py
 
 * 左のパネルでパラメータを入力し、[実行] を押すと計算が始まる。
 * 計算は別スレッドで走り、電位・電場・側壁プロファイル・電位の時間変化などが
@@ -15,8 +15,8 @@ trench_charging_2d.py と同じフォルダに置いて実行する:
 * [結果を保存] で図 2 枚 (_fields.png, _history.png) と .npz を保存できる。
 * [設定を保存/読込] でパラメータを JSON で保存・復元できる。
 
-必要なもの: Python 3.9+, numpy, scipy, matplotlib (Tkinter は Python に同梱。
-Linux では `sudo apt install python3-tk` が必要な場合がある)
+依存パッケージ (numpy, scipy, matplotlib) は uv で管理している (pyproject.toml / uv.lock)。
+Tkinter は Python に同梱 (Linux のシステム Python では `sudo apt install python3-tk` が必要な場合がある)
 """
 import json
 import os
