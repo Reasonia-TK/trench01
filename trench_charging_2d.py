@@ -23,9 +23,13 @@
         → Poisson 方程式を解き直して電場を更新、を繰り返す。
         (粒子の通過時間 ~ ps ≪ 帯電の時定数 ~ μs〜ms なので準静的近似が成り立つ)
 * 入射条件(上端境界):
-    - イオン  : 一定エネルギー Ei で垂直入射 + 横方向の熱速度 Ti
+    - イオン  : 垂直入射 + 横方向の熱速度 Ti。エネルギーは bias="rf" (既定) なら RF バイアスの
+                プラズマ等価回路 (plasma_circuit.py: RF 電源 → ブロッキングコンデンサ → ウェハ → SiO2 →
+                マスク → シース → プラズマ → シース → 接地) を RF 周期定常まで解いて求めた IED から選ぶ。
+                bias="dc" なら全イオンが ion_energy_eV。
+                帯電の時定数 (ms) は RF 周期 (74 ns) よりずっと長いので、IED だけを使う (一方向の連成)。
     - 電子    : 温度 Te のマクスウェル分布のフラックス分布(等方的)
-    - 電子フラックス = イオンフラックス (フローティング表面の平均的な電流バランス)
+    - 電子フラックス = イオンフラックス (フローティング表面の平均的な電流バランス。RF でも周期平均で成り立つ)
 * Poisson: div(eps_r grad phi) = -rho/eps0 を有限差分(セル中心, 面で調和平均)で解く。
           行列は形状固定なので LU 分解を 1 回だけ行う。
 * 粒子が固体セルに入ったら完全吸収(付着確率 1, イオン反射なし)。
@@ -45,6 +49,8 @@
     uv run trench_charging_2d.py --until_steady  # 飽和帯電に達するまで継続 (上限 --max_batches)
     uv run trench_charging_2d.py --mask_t 40     # マスク厚 40 セル = 200 nm (0 でマスクなし)
     uv run trench_charging_2d.py --mask_type dielectric --mask_eps_r 3.0  # 絶縁性のマスク
+    uv run trench_charging_2d.py --rf_freq 2e6 --rf_volt 150  # RF バイアスの周波数 [Hz] と振幅 [V]
+    uv run trench_charging_2d.py --bias dc       # RF 回路を使わず、全イオンを ion_energy_eV にする
     uv run trench_charging_2d.py --help          # 変更できるパラメータ一覧
 
 飽和まで継続モード (--until_steady)
@@ -55,7 +61,7 @@ steady_window バッチごとに「直近ブロックの平均電位」と「そ
 以内という条件を steady_hold 回連続で満たしたら終了する(ノイズの範囲内の変動は無視)。
 この場合 n_batches は使われず、max_batches が上限になる。
 
-出力: <out>_fields.png, <out>_history.png, <out>.npz
+出力: <out>_fields.png, <out>_history.png, <out>.npz (bias="rf" なら <out>_rf.png も)
 """
 import argparse
 import time
@@ -66,6 +72,8 @@ import scipy.sparse as sps
 from scipy.sparse.linalg import splu
 import matplotlib
 import matplotlib.pyplot as plt
+
+import plasma_circuit as PC
 
 # ---------------------------------------------------------------- 物理定数
 E_CHARGE = 1.602176634e-19   # [C]
@@ -94,9 +102,17 @@ class Params:
     # ---- プラズマ ----
     flux: float = 1e20        # 粒子フラックス [m^-2 s^-1] (= 1e16 cm^-2 s^-1)
     ion_mass_amu: float = 40.0  # イオン質量 [amu] (Ar+)
-    ion_energy_eV: float = 100.0  # イオン入射エネルギー(シース電圧) [eV]
+    ion_energy_eV: float = 100.0  # イオン入射エネルギー(シース電圧) [eV] (bias="dc" のとき)
     ion_temp_eV: float = 0.5  # イオンの横方向温度 [eV] -> 角度広がり
     electron_temp_eV: float = 3.0  # 電子温度 [eV]
+    # ---- RF バイアス (プラズマ等価回路, plasma_circuit.py) ----
+    bias: str = "rf"          # "rf": 等価回路のシース電圧から IED を作る / "dc": 全イオンが ion_energy_eV
+    rf_freq: float = 13.56e6  # RF 周波数 [Hz]
+    rf_volt: float = 100.0    # RF 電源の振幅 [V]
+    c_block: float = 4900e-12  # ブロッキングコンデンサ [F]
+    wafer_d: float = 0.3      # ウェハ (電極) の直径 [m]
+    wall_ratio: float = 5.0   # 接地側 (壁) の面積 / ウェハの面積
+    ied_model: str = "transit"  # "transit": シース通過時間で平均した IED / "instant": 瞬時のシース電圧
     # ---- 表面リーク ----
     sigma_s: float = 0.0      # 表面シート伝導度 [S] (0=リークなし)。目安: 1e-16〜1e-13
     # ---- 飽和まで継続モード ----
@@ -224,15 +240,17 @@ def compute_field(phi, vac, p):
 
 
 # ---------------------------------------------------------------- 粒子
-def inject(p, n, ny, rng):
-    """上端境界からイオン n 個 + 電子 n 個を入射させる。"""
+def inject(p, n, ny, rng, ion_energy=None):
+    """上端境界からイオン n 個 + 電子 n 個を入射させる。
+    ion_energy(rng, n): イオンエネルギー [eV] を選ぶ関数 (RF バイアスの IED)。None なら全イオンが ion_energy_eV。"""
     dx = p.dx
     Lx, Ly = p.nx * dx, ny * dx
     m_i = p.ion_mass_amu * AMU
 
     # イオン: 垂直入射 + 横方向の熱速度
     xi = rng.uniform(0, Lx, n)
-    vyi = -np.sqrt(2 * p.ion_energy_eV * E_CHARGE / m_i) * np.ones(n)
+    Ei = p.ion_energy_eV * np.ones(n) if ion_energy is None else ion_energy(rng, n)
+    vyi = -np.sqrt(2 * Ei * E_CHARGE / m_i)
     vxi = rng.normal(0, np.sqrt(p.ion_temp_eV * E_CHARGE / m_i), n)
 
     # 電子: マクスウェル分布の「フラックス重み付き」サンプリング
@@ -448,6 +466,8 @@ def run(p, log=print, progress=None, stop=None):
     progress(dict) : 毎バッチ後に呼ばれる(GUI の経過表示用)。phi, rho, Ex, Ey, hist などのコピーを渡す
     stop           : is_set() が True になったら、現在のバッチ終了後に中断する (threading.Event など)
     中断した場合も、それまでの結果を返す (1 バッチも終わっていなければ None)。"""
+    if p.bias not in PC.BIAS_TYPES:
+        raise ValueError(f"bias は {' / '.join(PC.BIAS_TYPES)} のどちらかにしてください: {p.bias!r}")
     rng = np.random.default_rng(p.seed)
     solid, mask, i0, i1 = build_geometry(p)
     vac = ~solid
@@ -476,6 +496,13 @@ def run(p, log=print, progress=None, stop=None):
             "正電荷が溜まり続け、長時間では非物理的に強い電場になります。sigma_s > 0 との併用を推奨します")
     if leak is not None:
         log(f"表面リーク ON: sigma_s={p.sigma_s:g} S, 表面セル数 {leak['flat'].size}")
+    circuit, ion_energy = None, None
+    if p.bias == "rf":
+        circuit = PC.solve_circuit(p)
+        ion_energy = PC.ion_energy_sampler(circuit)
+        log(f"RF {p.rf_freq/1e6:g} MHz, 振幅 {p.rf_volt:g} V, C_b {p.c_block*1e12:g} pF, "
+            f"ウェハ {p.wafer_d*1e3:g} mm, 壁/ウェハ面積比 {p.wall_ratio:g}")
+        log(PC.summary(circuit))
     log(f"1 マクロ粒子 = 実粒子 {w_real:.1f} 個/m,  1 バッチ = {p.dt_batch*1e6:.2f} μs")
 
     # 観測点 (固体の表面セル)。側壁の上/中/下・底は誘電体部分
@@ -503,7 +530,7 @@ def run(p, log=print, progress=None, stop=None):
     n_ok, converged_at, stopped = 0, None, False
 
     for b in range(n_max):
-        x, y, vx, vy, qm, spc = inject(p, p.n_per_batch, ny, rng)
+        x, y, vx, vy, qm, spc = inject(p, p.n_per_batch, ny, rng, ion_energy)
         cnt_i, cnt_e, esc, n_lost = trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p)
 
         # 電荷の蓄積 -> Poisson
@@ -597,7 +624,7 @@ def run(p, log=print, progress=None, stop=None):
     t_conv = converged_at * p.dt_batch if converged_at else np.nan
     return dict(phi=phi, rho=conductor_surface_charge(rho, phi, A, cond), Ex=Ex, Ey=Ey,
                 solid=solid, mask=mask, i0=i0, i1=i1, hist=hist, probes=probes,
-                steady=steady, t_conv=t_conv, stopped=stopped)
+                steady=steady, t_conv=t_conv, stopped=stopped, circuit=circuit)
 
 
 # ---------------------------------------------------------------- 可視化
@@ -714,19 +741,35 @@ def plot_results(res, p, out, pyplot=True):
     fig.savefig(f"{out}_history.png", dpi=130)
 
 
+def plot_circuit_figure(c, pyplot=False):
+    """等価回路の波形と IED の図 (Figure) を作る。"""
+    fig, axs = _subplots(2, (12, 4.2), pyplot)
+    PC.plot_circuit(c, axs[0], axs[1])
+    fig.tight_layout()
+    return fig
+
+
 def save_results(res, p, out, pyplot=False):
-    """図 2 枚 (<out>_fields.png, <out>_history.png) と <out>.npz を保存する。"""
+    """図 2 枚 (<out>_fields.png, <out>_history.png) と <out>.npz を保存する。
+    RF バイアスなら等価回路の図 <out>_rf.png も保存し、npz に波形と IED (rf_*) を入れる。"""
     plot_results(res, p, out, pyplot=pyplot)
+    files = [f"{out}_fields.png", f"{out}_history.png", f"{out}.npz"]
+    c = res.get("circuit")
+    rf = {}
+    if c is not None:
+        plot_circuit_figure(c, pyplot).savefig(f"{out}_rf.png", dpi=130)
+        files.append(f"{out}_rf.png")
+        rf = {f"rf_{k}": c[k] for k in ("t", "us", "uw", "um", "up", "V1", "i", "E", "tau_i")}
     np.savez(f"{out}.npz", phi=res["phi"], rho=res["rho"], Ex=res["Ex"], Ey=res["Ey"],
              solid=res["solid"], mask=res["mask"], t_conv=res["t_conv"],
              **{f"hist_{k}": v for k, v in res["hist"].items()},
-             **{f"steady_{k}": v for k, v in res["steady"].items()})
-    return [f"{out}_fields.png", f"{out}_history.png", f"{out}.npz"]
+             **{f"steady_{k}": v for k, v in res["steady"].items()}, **rf)
+    return files
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    choices = {"mask_type": MASK_TYPES}
+    choices = {"mask_type": MASK_TYPES, "bias": PC.BIAS_TYPES, "ied_model": PC.IED_MODELS}
     for k, v in asdict(Params()).items():
         if isinstance(v, bool):
             ap.add_argument(f"--{k}", action="store_true", default=v)

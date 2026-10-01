@@ -12,7 +12,8 @@ trench_charging_2d.py と同じフォルダに置いて実行する:
 * 計算は別スレッドで走り、電位・電場・側壁プロファイル・電位の時間変化などが
   バッチごとにリアルタイム更新される。[停止] でいつでも中断できる(それまでの結果は残る)。
 * 実行モードは「固定長」と「飽和まで継続」から選べる。
-* [結果を保存] で図 2 枚 (_fields.png, _history.png) と .npz を保存できる。
+* [結果を保存] で図 2 枚 (_fields.png, _history.png) と .npz を保存できる (RF バイアスなら _rf.png も)。
+* [回路の波形…] で、今の入力値での RF バイアスの等価回路の波形とイオンエネルギー分布 (IED) を確認できる。
 * [設定を保存/読込] でパラメータを JSON で保存・復元できる。
 
 依存パッケージ (numpy, scipy, matplotlib) は uv で管理している (pyproject.toml / uv.lock)。
@@ -36,6 +37,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
 import trench_charging_2d as T
+import plasma_circuit as PC
 
 
 # ---------------------------------------------------------------- 入力欄の定義
@@ -58,10 +60,20 @@ MASK = [
 PLASMA = [
     ("flux", "粒子フラックス", "m⁻²s⁻¹", 1, float),
     ("ion_mass_amu", "イオン質量 (Ar = 40)", "amu", 1, float),
-    ("ion_energy_eV", "イオンエネルギー", "eV", 1, float),
+    ("ion_energy_eV", "イオンエネルギー (dc)", "eV", 1, float),
     ("ion_temp_eV", "イオン横方向温度", "eV", 1, float),
     ("electron_temp_eV", "電子温度", "eV", 1, float),
 ]
+RF = [
+    ("bias", "バイアス (rf: 等価回路)", "", 1, PC.BIAS_TYPES),
+    ("rf_freq", "RF 周波数", "MHz", 1e6, float),
+    ("rf_volt", "RF 振幅", "V", 1, float),
+    ("c_block", "ブロッキングコンデンサ", "pF", 1e-12, float),
+    ("wafer_d", "ウェハ直径", "mm", 1e-3, float),
+    ("wall_ratio", "壁 / ウェハの面積比", "", 1, float),
+    ("ied_model", "IED のモデル", "", 1, PC.IED_MODELS),
+]
+RF_KEYS = {f[0] for f in RF} - {"bias"}
 LEAK = [
     ("sigma_s", "表面シート伝導度 (0=なし)", "S", 1, float),
 ]
@@ -116,6 +128,10 @@ def validate(p):
         return "フラックス・イオン質量・イオンエネルギー・電子温度は正の値にしてください。"
     if p.ion_temp_eV < 0 or p.sigma_s < 0:
         return "イオン温度と表面シート伝導度は 0 以上にしてください。"
+    if p.bias == "rf" and min(p.rf_freq, p.c_block, p.wafer_d, p.wall_ratio) <= 0:
+        return "RF 周波数・ブロッキングコンデンサ・ウェハ直径・面積比は正の値にしてください。"
+    if p.bias == "rf" and p.rf_volt < 0:
+        return "RF 振幅は 0 以上にしてください。"
     if p.n_per_batch < 100 or p.dt_batch <= 0:
         return "1バッチの粒子数は 100 以上、物理時間は正の値にしてください。"
     if not (0 < p.cfl <= 1) or p.max_steps < 100:
@@ -326,6 +342,7 @@ class App(tk.Tk):
         self._group(inner, "形状", GEOMETRY)
         self._group(inner, "マスク", MASK)
         self._group(inner, "プラズマ", PLASMA)
+        self._group(inner, "RF バイアス (プラズマ等価回路)", RF)
         self._group(inner, "表面リーク", LEAK)
 
         g = ttk.LabelFrame(inner, text="実行モード")
@@ -386,7 +403,9 @@ class App(tk.Tk):
         self.btn_cfg_save = ttk.Button(bar, text="設定を保存…", command=self.on_cfg_save)
         self.btn_cfg_load = ttk.Button(bar, text="設定を読込…", command=self.on_cfg_load)
         self.btn_reset = ttk.Button(bar, text="既定値に戻す", command=lambda: self.set_params(T.Params()))
-        for b in (self.btn_run, self.btn_stop, self.btn_save, self.btn_cfg_save, self.btn_cfg_load, self.btn_reset):
+        self.btn_circuit = ttk.Button(bar, text="回路の波形…", command=self.on_circuit)
+        for b in (self.btn_run, self.btn_stop, self.btn_save, self.btn_cfg_save, self.btn_cfg_load, self.btn_reset,
+                  self.btn_circuit):
             b.pack(side="left", padx=2)
 
         self.pbar = ttk.Progressbar(right, mode="determinate", maximum=100)
@@ -467,6 +486,10 @@ class App(tk.Tk):
                 st = "normal" if steady else "disabled"
             elif key == "mask_eps_r":
                 st = "normal" if self.vars["mask_type"].get() == "dielectric" else "disabled"
+            elif key in RF_KEYS:
+                st = "normal" if self.vars["bias"].get() == "rf" else "disabled"
+            elif key == "ion_energy_eV":
+                st = "normal" if self.vars["bias"].get() == "dc" else "disabled"
             else:
                 st = "normal"
             if isinstance(w, ttk.Combobox) and st == "normal":
@@ -492,7 +515,10 @@ class App(tk.Tk):
                          f"{(p.trench_d + p.mask_t) / p.trench_w:.1f}")
         else:
             lines.append("マスクなし")
-        if p.ion_energy_eV > 0 and p.ion_temp_eV >= 0:
+        if p.bias == "rf":
+            lines.append(f"RF {p.rf_freq / 1e6:g} MHz・{p.rf_volt:g} V (C_b {p.c_block * 1e12:g} pF, "
+                         f"ウェハ {p.wafer_d * 1e3:g} mm): IED は「回路の波形…」で確認")
+        elif p.ion_energy_eV > 0 and p.ion_temp_eV >= 0:
             lines.append(f"イオン角度広がり ≈ {np.degrees(np.sqrt(p.ion_temp_eV / (2 * p.ion_energy_eV))):.1f}°")
         if p.until_steady:
             lines.append(f"飽和判定 {p.steady_window * p.dt_batch * 1e3:.1f} ms ごと / 上限 "
@@ -633,6 +659,35 @@ class App(tk.Tk):
         self.pbar.configure(value=100 if not res["stopped"] else self.pbar["value"])
         self.status2.set("飽和値: " + " | ".join(f"{k} {v:.1f} V" for k, v in res["steady"].items()))
         self.btn_save.configure(state="normal")
+
+    # ---------------- 等価回路の確認
+    def on_circuit(self):
+        """今の入力値で RF バイアスの等価回路を解き、波形と IED を別ウィンドウに表示する。"""
+        try:
+            p = self.get_params()
+            err = validate(p)
+            if err:
+                raise ValueError(err)
+        except ValueError as e:
+            messagebox.showerror("入力エラー", str(e))
+            return
+        if p.bias != "rf":
+            messagebox.showinfo("回路の波形", "バイアスが dc のときは等価回路を使いません (全イオンが同じエネルギー)。")
+            return
+        try:
+            c = PC.solve_circuit(p)
+        except (RuntimeError, ValueError) as e:
+            messagebox.showerror("等価回路のエラー", str(e))
+            return
+        win = tk.Toplevel(self)
+        win.title("RF バイアスの等価回路")
+        fig = Figure(figsize=(11, 4.2), dpi=100, constrained_layout=True)
+        PC.plot_circuit(c, *fig.subplots(1, 2))
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        ttk.Label(win, text=PC.summary(c), justify="left").pack(anchor="w", padx=8, pady=4)
+        canvas.draw()
+        self._log(PC.summary(c))
 
     # ---------------- 保存・設定
     def on_save(self):
