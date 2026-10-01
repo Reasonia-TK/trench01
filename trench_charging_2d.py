@@ -34,7 +34,7 @@
           行列は形状固定なので LU 分解を 1 回だけ行う。
 * 粒子が固体セルに入ったら完全吸収(付着確率 1, イオン反射なし)。
 * 表面リーク: 誘電体の表面セル(真空に接するセル)を抵抗網でつなぎ、電位差に応じて
-    表面に沿って電荷が移動する(シート伝導度 sigma_s [S], 0 で無効)。
+    表面に沿って電荷が移動する(シート伝導度 sigma_s [S], 既定 1e-15 S, 0 で無効)。
     dQ/dt = G phi (G: 表面セル間のコンダクタンス行列, phi = P Q は Poisson の応答)
     を後退オイラーで解くので、sigma_s が大きくても無条件安定で総電荷も保存される。
 
@@ -45,7 +45,7 @@
     uv run trench_charging_2d.py                 # 既定値で実行 (約4分, 30 ms 分の帯電)
     uv run trench_charging_2d.py --n_batches 60  # 短時間で動作確認
     uv run trench_charging_2d.py --trench_d 120  # アスペクト比を変える
-    uv run trench_charging_2d.py --sigma_s 1e-14 # 表面リークあり (シート伝導度 1e-14 S)
+    uv run trench_charging_2d.py --sigma_s 1e-14 # 表面リークを強くする (既定 1e-15 S, 0 でリークなし)
     uv run trench_charging_2d.py --until_steady  # 飽和帯電に達するまで継続 (上限 --max_batches)
     uv run trench_charging_2d.py --mask_t 40     # マスク厚 40 セル = 200 nm (0 でマスクなし)
     uv run trench_charging_2d.py --mask_type dielectric --mask_eps_r 3.0  # 絶縁性のマスク
@@ -114,7 +114,8 @@ class Params:
     wall_ratio: float = 5.0   # 接地側 (壁) の面積 / ウェハの面積
     ied_model: str = "transit"  # "transit": シース通過時間で平均した IED / "instant": 瞬時のシース電圧
     # ---- 表面リーク ----
-    sigma_s: float = 0.0      # 表面シート伝導度 [S] (0=リークなし)。目安: 1e-16〜1e-13
+    sigma_s: float = 1e-15    # 表面シート伝導度 [S] (0=リークなし)。目安: 1e-16〜1e-13
+    #                           導電性マスクでは、マスク境目の電荷を逃がすため 0 より大きくする
     # ---- 飽和まで継続モード ----
     until_steady: bool = False  # True: 電位が飽和するまで継続 (n_batches は無視, max_batches が上限)
     max_batches: int = 3000   # 継続モードの上限バッチ数 (3000 -> 300 ms)

@@ -36,7 +36,7 @@ Linux のシステム Python では `sudo apt install python3-tk`)。
 uv run trench_charging_gui.py                       # GUI
 uv run trench_charging_2d.py                        # CLI (既定: 30 ms 分の帯電)
 uv run trench_charging_2d.py --until_steady         # 飽和帯電まで継続
-uv run trench_charging_2d.py --sigma_s 1e-14        # 表面リークあり (シート伝導度 [S])
+uv run trench_charging_2d.py --sigma_s 1e-14        # 表面リークを強くする (シート伝導度 [S], 既定 1e-15, 0 でなし)
 uv run trench_charging_2d.py --trench_d 160         # 深さ 160 セル = 800 nm (AR=8)
 uv run trench_charging_2d.py --mask_t 40            # マスク厚 40 セル = 200 nm (0 でマスクなし)
 uv run trench_charging_2d.py --mask_type dielectric --mask_eps_r 3.0   # 絶縁性のマスク
@@ -69,7 +69,7 @@ CLI の出力は `<out>_fields.png`, `<out>_history.png`, `<out>.npz` です (RF
 - **帯電**: 電場を固定して 1 バッチ分の粒子を追跡 → 壁面セルに電荷を蓄積 → Poisson を解き直す、の繰り返し
   (粒子の通過時間 ≪ 帯電の時定数、という準静的近似)。Poisson は誘電率の調和平均を使った有限差分で、
   行列は固定なので LU 分解を 1 回だけ行う。
-- **表面リーク**: 表面セルを抵抗網でつなぎ (シート伝導度 `sigma_s`)、電位差に応じて表面に沿って電荷を移動。
+- **表面リーク**: 表面セルを抵抗網でつなぎ (シート伝導度 `sigma_s`、既定 1e-15 S)、電位差に応じて表面に沿って電荷を移動。
   後退オイラーで解くので `sigma_s` が大きくても安定で、総電荷は保存される。マスクの表面も同じ `sigma_s` でつなぐ
   (導電性マスクでは、SiO2 表面との境目で電荷が導体に出入りする)。
 - **飽和判定** (`--until_steady`): 一定バッチごとのブロック平均電位を前のブロックと比較し、
