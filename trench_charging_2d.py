@@ -85,6 +85,7 @@ M_E = 9.1093837015e-31       # [kg]
 AMU = 1.66053906660e-27      # [kg]
 
 MASK_TYPES = ("conductor", "dielectric")  # mask_type の選択肢
+WALL_MODELS = ("barrier", "absorb")       # wall_model の選択肢
 
 
 @dataclass
@@ -119,6 +120,8 @@ class Params:
     wafer_d: float = 0.3      # ウェハ (電極) の直径 [m]
     wall_ratio: float = 5.0   # 接地側 (壁) の面積 / ウェハの面積
     ied_model: str = "sheath"  # IED: "sheath" (1 次元シースの時間発展) / "transit" (通過時間で平均) / "instant"
+    gas_pressure: float = 1.0  # 背景ガス (イオンと同じ原子, Ar) の圧力 [Pa]。1 次元シースの衝突 (南部–北谷モデル), 0 で衝突なし
+    gas_temp: float = 300.0    # 背景ガスの温度 [K]
     # ---- 表面リーク ----
     sigma_s: float = 1e-15    # 表面シート伝導度 [S] (0=リークなし)。目安: 1e-16〜1e-13
     #                           導電性マスクでは、マスク境目の電荷を逃がすため 0 より大きくする
@@ -134,6 +137,7 @@ class Params:
     dt_batch: float = 1e-4    # 1 バッチが表す物理時間 [s] (大きすぎると電位が振動する)
     cfl: float = 0.35         # 1 ステップで進む距離の上限 [セル]
     max_steps: int = 3000     # 1 粒子あたりの最大ステップ数 (超えたら打ち切り=捕捉粒子)
+    wall_model: str = "barrier"  # 壁際: "barrier" (壁面までの電位の山を越えられない粒子は反射) / "absorb" (すべて吸収)
     seed: int = 1
 
 
@@ -247,18 +251,23 @@ def compute_field(phi, vac, p):
 
 
 # ---------------------------------------------------------------- 粒子
-def inject(p, n, ny, rng, ion_energy=None):
+def inject(p, n, ny, rng, ion_energy=None, ion_velocity=None):
     """上端境界からイオン n 個 + 電子 n 個を入射させる。
-    ion_energy(rng, n): イオンエネルギー [eV] を選ぶ関数 (RF バイアスの IED)。None なら全イオンが ion_energy_eV。"""
+    ion_velocity(rng, n) -> (vx, vy): イオンの速度を選ぶ関数 (1 次元シースで電極に着いたイオンの組。衝突による
+        角度の広がりも含む)。ion_energy(rng, n): イオンエネルギー [eV] を選ぶ関数 (transit / instant の IED)。
+    どちらもなければ全イオンが ion_energy_eV。エネルギーで選ぶときは、横方向の熱速度 (ion_temp_eV) を足す。"""
     dx = p.dx
     Lx, Ly = p.nx * dx, ny * dx
     m_i = p.ion_mass_amu * AMU
 
     # イオン: 垂直入射 + 横方向の熱速度
     xi = rng.uniform(0, Lx, n)
-    Ei = p.ion_energy_eV * np.ones(n) if ion_energy is None else ion_energy(rng, n)
-    vyi = -np.sqrt(2 * Ei * E_CHARGE / m_i)
-    vxi = rng.normal(0, np.sqrt(p.ion_temp_eV * E_CHARGE / m_i), n)
+    if ion_velocity is not None:
+        vxi, vyi = ion_velocity(rng, n)
+    else:
+        Ei = p.ion_energy_eV * np.ones(n) if ion_energy is None else ion_energy(rng, n)
+        vyi = -np.sqrt(2 * Ei * E_CHARGE / m_i)
+        vxi = rng.normal(0, np.sqrt(p.ion_temp_eV * E_CHARGE / m_i), n)
 
     # 電子: マクスウェル分布の「フラックス重み付き」サンプリング
     #   面に垂直な成分は Rayleigh 分布 (∝ v exp(-v^2/2s^2)), 平行成分は正規分布
@@ -296,8 +305,43 @@ def interp_field(x, y, F, dx):
     return acc[:, 0] / w, acc[:, 1] / w
 
 
-def trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p):
-    """凍結した電場中で粒子群を追跡。固体に当たった位置のセル数を種別ごとに返す。"""
+def _wall_entry(x0, y0, sx, sy, vac, dx):
+    """固体セルに入った粒子 (移動前の位置 x0, y0 と移動量 sx, sy) について、最初に入った固体セル (cx, cy)、
+    そこへ入る直前の真空セル (vx_, vy_)、横切った面が x 向きか (face_x) を返す。
+    1 ステップの移動は 1 セル未満なので、斜めの移動では x と y の境界のどちらを先に横切ったかで決める。"""
+    nx, ny = vac.shape
+    ix0 = np.minimum((x0 / dx).astype(np.int64), nx - 1)
+    iy0 = np.minimum(np.maximum((y0 / dx).astype(np.int64), 0), ny - 1)
+    xu, yu = x0 + sx, y0 + sy                            # 周期で折り返さない移動後の位置
+    dix = np.floor(xu / dx).astype(np.int64) - ix0
+    diy = np.minimum(np.maximum(np.floor(yu / dx).astype(np.int64), 0), ny - 1) - iy0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fx = np.where(dix != 0, ((ix0 + (dix > 0)) * dx - x0) / sx, np.inf)   # x の境界を横切る時刻 (割合)
+        fy = np.where(diy != 0, ((iy0 + (diy > 0)) * dx - y0) / sy, np.inf)
+    x_first = fx < fy
+    # 先に横切った境界の向こうのセル
+    ax_ = np.where(x_first, (ix0 + dix) % nx, ix0)
+    ay_ = np.where(x_first, iy0, iy0 + diy)
+    diag = (dix != 0) & (diy != 0)
+    first_solid = ~vac[ax_, ay_]
+    # 斜めの移動で、先に入ったセルが真空なら、もう一方の境界を横切って最後のセルに入った
+    last_x, last_y = (ix0 + dix) % nx, iy0 + diy
+    use_last = diag & ~first_solid
+    cx = np.where(use_last, last_x, ax_)
+    cy = np.where(use_last, last_y, ay_)
+    vx_ = np.where(use_last, ax_, ix0)
+    vy_ = np.where(use_last, ay_, iy0)
+    face_x = np.where(use_last, ~x_first, x_first)
+    return cx, cy, vx_, vy_, face_x
+
+
+def trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p, barrier=None):
+    """凍結した電場中で粒子群を追跡。固体に当たった位置のセル数を種別ごとに返す。
+    barrier=None (wall_model="absorb"): 固体セルに入った粒子はすべて吸収する。
+    barrier=(phi, wface) (wall_model="barrier"): 壁面の電位 φ_面 = φ_真空 + wface (φ_固体 - φ_真空) までの
+        電位の山を、壁に垂直な運動エネルギーで越えられない粒子 (m v_n^2 / 2 < q (φ_面 - φ_真空)) は鏡面反射させる。
+        電場は真空セルだけから作るので、真空セルの中心から壁面までの半セル分の電位差をここで扱う。
+        wface = ε/(1+ε) (誘電体: 電束の連続から), 導体は 1 (導体表面 = 面の位置)。"""
     nx, ny = vac.shape
     dx = p.dx
     Lx, Ly = nx * dx, ny * dx
@@ -314,8 +358,10 @@ def trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p):
         speed = np.hypot(vx, vy)
         dt = p.cfl * dx / (speed + np.sqrt(2.0 * dx * np.hypot(ax, ay)) + 1.0)
         vxn, vyn = vx + ax * dt, vy + ay * dt
-        x = (x + 0.5 * (vx + vxn) * dt) % Lx
-        y = y + 0.5 * (vy + vyn) * dt
+        x0, y0 = x, y
+        sx, sy = 0.5 * (vx + vxn) * dt, 0.5 * (vy + vyn) * dt
+        x = (x + sx) % Lx
+        y = y + sy
         vx, vy = vxn, vyn
 
         escaped = y >= Ly
@@ -323,6 +369,20 @@ def trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p):
         iy = np.minimum(np.maximum((y / dx).astype(np.int64), 0), ny - 1)
         hit = (~escaped) & (~vac[ix, iy])
 
+        if barrier is not None and hit.any():
+            phi, wface = barrier
+            h = np.flatnonzero(hit)
+            cx, cy, vcx, vcy, face_x = _wall_entry(x0[h], y0[h], sx[h], sy[h], vac, dx)
+            vn = np.where(face_x, vx[h], vy[h])
+            d_phi = wface[cx, cy] * (phi[cx, cy] - phi[vcx, vcy])       # φ_面 - φ_真空
+            refl = 0.5 * vn ** 2 < qm[h] * d_phi                         # 電位の山を越えられない
+            r = h[refl]
+            rx = face_x[refl]
+            vx[r] = np.where(rx, -vx[r], vx[r])
+            vy[r] = np.where(rx, vy[r], -vy[r])
+            x[r], y[r] = x0[r], y0[r]                                    # 移動前の位置 (真空) に戻す
+            hit[r] = False
+            ix[h], iy[h] = cx, cy                                        # 吸収は最初に入った固体セルに
         if hit.any():
             flat, s = ix[hit] * ny + iy[hit], spc[hit]
             hits[0].append(flat[s == 0])
@@ -467,11 +527,12 @@ def check_steady(hist, probes, p):
 
 
 # ---------------------------------------------------------------- メイン計算
-def run(p, log=print, progress=None, stop=None):
+def run(p, log=print, progress=None, stop=None, use_cache=True):
     """シミュレーション本体。
     log(str)       : ログ出力先 (既定は print)
     progress(dict) : 毎バッチ後に呼ばれる(GUI の経過表示用)。phi, rho, Ex, Ey, hist などのコピーを渡す
     stop           : is_set() が True になったら、現在のバッチ終了後に中断する (threading.Event など)
+    use_cache      : RF バイアスの等価回路と IED の結果を .cache/circuit に保存・再利用する
     中断した場合も、それまでの結果を返す (1 バッチも終わっていなければ None)。"""
     if p.bias not in PC.BIAS_TYPES:
         raise ValueError(f"bias は {' / '.join(PC.BIAS_TYPES)} のどちらかにしてください: {p.bias!r}")
@@ -482,7 +543,11 @@ def run(p, log=print, progress=None, stop=None):
     dx = p.dx
     conductor = p.mask_type == "conductor" and mask.any()
     cond = mask if conductor else np.zeros_like(mask)     # 導体のセル (導電性マスク)
-    A = build_poisson(permittivity(solid, mask, p), cond, p)
+    if p.wall_model not in WALL_MODELS:
+        raise ValueError(f"wall_model は {' / '.join(WALL_MODELS)} のどちらかにしてください: {p.wall_model!r}")
+    eps = permittivity(solid, mask, p)
+    wface = np.where(cond, 1.0, eps / (1.0 + eps))     # 壁面の電位 = φ_真空 + wface (φ_固体 - φ_真空)
+    A = build_poisson(eps, cond, p)
     solve = make_solver(A, cond)
     leak = build_leakage(solid, solve, i0, i1, p) if p.sigma_s > 0 else None
     if conductor:
@@ -500,18 +565,26 @@ def run(p, log=print, progress=None, stop=None):
         log(f"マスク: 厚さ {p.mask_t*dx*1e9:.0f} nm, {kind},  開口全体の AR={(p.trench_d + p.mask_t)/p.trench_w:.1f}")
     if conductor and leak is None:
         log("注意: 導電性マスクで表面リークなし (sigma_s=0) だと、マスクと誘電体の境目のすぐ下の誘電体表面に"
-            "正電荷が溜まり続け、長時間では非物理的に強い電場になります。sigma_s > 0 との併用を推奨します")
+            "正電荷が集中し、絶縁破壊を超える非物理的に強い電場になります (wall_model=absorb では溜まり続けます)。"
+            "sigma_s > 0 との併用を推奨します")
     if leak is not None:
         log(f"表面リーク ON: sigma_s={p.sigma_s:g} S, 表面セル数 {leak['flat'].size}")
-    circuit, ion_energy = None, None
+    circuit, ion_energy, ion_velocity = None, None, None
     if p.bias == "rf":
         if p.ied_model == "sheath":
-            log("RF バイアスの等価回路と 1 次元シースを計算しています (数〜20 秒)…")
-        circuit = PC.solve_circuit(p)
-        ion_energy = PC.ion_energy_sampler(circuit)
+            log("RF バイアスの等価回路と 1 次元シースを計算しています (キャッシュがなければ数〜20 秒)…")
+        circuit = PC.solve_circuit_cached(p, use_cache, log)
+        if circuit["cached"]:
+            log(f"等価回路と IED はキャッシュから読み込みました ({PC.cache_key(p)})")
+        if "vn" in circuit:                     # 1 次元シース: 速度の組 (角度の広がりを含む) から選ぶ
+            ion_velocity = PC.ion_velocity_sampler(circuit)
+        else:
+            ion_energy = PC.ion_energy_sampler(circuit)
         log(f"RF バイアスの電源: {PC.source_label(p)}, C_b {p.c_block*1e12:g} pF, "
             f"ウェハ {p.wafer_d*1e3:g} mm, 壁/ウェハ面積比 {p.wall_ratio:g}")
         log(PC.summary(circuit))
+        if p.ied_model != "sheath" and p.gas_pressure > 0:
+            log("注意: ガスとの衝突 (gas_pressure) は ied_model=sheath のときだけ扱います")
     log(f"1 マクロ粒子 = 実粒子 {w_real:.1f} 個/m,  1 バッチ = {p.dt_batch*1e6:.2f} μs")
 
     # 観測点 (固体の表面セル)。側壁の上/中/下・底は誘電体部分
@@ -539,8 +612,9 @@ def run(p, log=print, progress=None, stop=None):
     n_ok, converged_at, stopped = 0, None, False
 
     for b in range(n_max):
-        x, y, vx, vy, qm, spc = inject(p, p.n_per_batch, ny, rng, ion_energy)
-        cnt_i, cnt_e, esc, n_lost = trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p)
+        x, y, vx, vy, qm, spc = inject(p, p.n_per_batch, ny, rng, ion_energy, ion_velocity)
+        cnt_i, cnt_e, esc, n_lost = trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p,
+                                          (phi, wface) if p.wall_model == "barrier" else None)
 
         # 電荷の蓄積 -> Poisson
         rho_prev = rho.copy() if conductor else None
@@ -751,9 +825,10 @@ def plot_results(res, p, out, pyplot=True):
 
 
 def plot_circuit_figure(c, pyplot=False):
-    """等価回路の波形と IED の図 (Figure) を作る。"""
-    fig, axs = _subplots(2, (12, 4.2), pyplot)
-    PC.plot_circuit(c, axs[0], axs[1])
+    """等価回路の波形と IED (1 次元シースならイオンの角度分布も) の図 (Figure) を作る。"""
+    n = 3 if "vn" in c else 2
+    fig, axs = _subplots(n, (6 * n, 4.2), pyplot)
+    PC.plot_circuit(c, *axs)
     fig.tight_layout()
     return fig
 
@@ -768,7 +843,8 @@ def save_results(res, p, out, pyplot=False):
     if c is not None:
         plot_circuit_figure(c, pyplot).savefig(f"{out}_rf.png", dpi=130)
         files.append(f"{out}_rf.png")
-        rf = {f"rf_{k}": c[k] for k in ("t", "us", "uw", "um", "up", "V1", "i", "E", "tau_i")}
+        rf = {f"rf_{k}": c[k] for k in ("t", "us", "uw", "um", "up", "V1", "i", "E", "tau_i", "vn", "vx", "vz")
+              if k in c}
     np.savez(f"{out}.npz", phi=res["phi"], rho=res["rho"], Ex=res["Ex"], Ey=res["Ey"],
              solid=res["solid"], mask=res["mask"], t_conv=res["t_conv"],
              **{f"hist_{k}": v for k, v in res["hist"].items()},
@@ -778,7 +854,7 @@ def save_results(res, p, out, pyplot=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    choices = {"mask_type": MASK_TYPES, "bias": PC.BIAS_TYPES, "rf_wave": PC.WAVE_TYPES,
+    choices = {"mask_type": MASK_TYPES, "wall_model": WALL_MODELS, "bias": PC.BIAS_TYPES, "rf_wave": PC.WAVE_TYPES,
                "ied_model": PC.IED_MODELS}
     for k, v in asdict(Params()).items():
         if isinstance(v, bool):
@@ -787,13 +863,14 @@ def main():
             ap.add_argument(f"--{k}", type=type(v), default=v, choices=choices.get(k))
     ap.add_argument("--out", default="trench_charging")
     ap.add_argument("--show", action="store_true", help="図をウィンドウにも表示する")
+    ap.add_argument("--no_cache", action="store_true", help="等価回路と IED のキャッシュ (.cache/circuit) を使わない")
     args = vars(ap.parse_args())
-    out, show = args.pop("out"), args.pop("show")
+    out, show, no_cache = args.pop("out"), args.pop("show"), args.pop("no_cache")
     p = Params(**args)
 
     if not show:
         matplotlib.use("Agg")
-    res = run(p)
+    res = run(p, use_cache=not no_cache)
     files = save_results(res, p, out, pyplot=show)
     print("保存: " + ", ".join(files))
     if show:

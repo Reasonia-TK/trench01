@@ -37,7 +37,14 @@ Yu et al., Plasma Sources Sci. Technol. 31, 035012 (2022) の従来型の等価�
              シース厚)。正弦波の 13.56 MHz 以上では sheath と近いが、パルスや 2 MHz 前後ではずれる。
     instant: 瞬時のシース電圧 E(t0) = e V1(t0) + e Te / 2 (論文 式 (5))。十分に低い周波数でだけ正しい。
   transit / instant ではイオン電流が時間的に一定として t0 を RF 周期の中で一様に選ぶ。
+* キャッシュ (solve_circuit_cached): 結果を .cache/circuit/<キー>.npz に保存し、同じ条件なら読み込む。
+  キーは結果に効くパラメーター (CACHE_PARAMS) と CACHE_VERSION のハッシュ。回路・IED の計算方法を
+  変えたら CACHE_VERSION を上げる (古いキャッシュは使われなくなる)。
 """
+import hashlib
+import json
+import os
+
 import numpy as np
 from scipy.integrate import solve_ivp
 
@@ -183,9 +190,9 @@ def solve_circuit(p, n_phase=4096, max_periods=3000):
     V1m = V1.mean()
     s = (4 / 3) * EPS0 * V1m / (el["K"] * (V1m + Te) ** 0.25)   # Child 則: 表面の電場 4V/(3s) = 電荷 / ε0
     tau_i = 3 * s * np.sqrt(el["m_i"] / (2 * E_CHARGE * V1m))
-    sheath = None
-    if p.ied_model == "sheath":
-        E, sheath = SH.ion_energies(t, V1, el, p.flux)              # 電極に着いたイオンのエネルギーの集合
+    sheath, vel = None, {}
+    if p.ied_model == "sheath":                     # 電極に着いたイオンのエネルギーと速度 (vn, vx, vz) の集合
+        E, vel, sheath = SH.ion_energies(t, V1, el, p.flux, p.ion_temp_eV, p.gas_pressure, p.gas_temp)
     elif p.ied_model == "transit":
         k_h = np.arange(n_phase // 2 + 1)
         E = np.fft.irfft(np.fft.rfft(V1) / (1 - 1j * k_h * w * tau_i / 2), n_phase) + Te / 2
@@ -193,7 +200,74 @@ def solve_circuit(p, n_phase=4096, max_periods=3000):
         E = V1 + Te / 2
     return dict(t=t, us=us, uw=uw, um=um, up=up, V1=V1, i=i, E=E, ied_model=p.ied_model, sheath=sheath,
                 Ie1=_electron_current(V1, el["A1"], el), I_i1=el["J_i"] * el["A1"],
-                tau_i=tau_i, s=s, n_periods=k + 1, elements=el)
+                tau_i=tau_i, s=s, n_periods=k + 1, elements=el, **vel)
+
+
+CACHE_VERSION = 2   # 回路・IED の計算方法を変えたら上げる (2: 1 次元シースに衝突と面内速度を追加)
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "circuit")
+CACHE_PARAMS = ("flux", "electron_temp_eV", "ion_mass_amu", "ion_temp_eV",
+                "rf_freq", "rf_volt", "rf_wave", "rf_duty", "rf_rise", "c_block", "wafer_d", "wall_ratio",
+                "ied_model", "gas_pressure", "gas_temp", "dx", "nx", "trench_w", "trench_d", "floor_t", "eps_r",
+                "mask_t", "mask_type", "mask_eps_r")   # solve_circuit の結果に効くパラメーター
+_CACHE_ARRAYS = ("t", "us", "uw", "um", "up", "V1", "i", "E", "Ie1")
+_CACHE_OPTIONAL = ("vn", "vx", "vz")                   # 1 次元シースのときだけある配列
+
+
+def _key_value(v):
+    """数値は float にそろえる (rf_volt=200 と 200.0 を同じキーにする)。"""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+
+
+def cache_key(p):
+    """結果に効くパラメーターと CACHE_VERSION から作るキャッシュのキー (16 進 20 文字)。"""
+    s = json.dumps({"version": CACHE_VERSION, **{k: _key_value(getattr(p, k)) for k in CACHE_PARAMS}},
+                   sort_keys=True)
+    return hashlib.sha256(s.encode()).hexdigest()[:20]
+
+
+def _save_cache(path, c):
+    """配列は npz、数値と dict は JSON 文字列にして保存する (読み込みに pickle を使わない)。"""
+    meta = {k: c[k] for k in ("I_i1", "tau_i", "s", "n_periods", "ied_model", "elements")}
+    arrays = {k: c[k] for k in _CACHE_ARRAYS + _CACHE_OPTIONAL if k in c}
+    if c["sheath"] is not None:
+        meta["sheath"] = {k: v for k, v in c["sheath"].items() if k not in ("y", "phi")}
+        arrays["sheath_y"], arrays["sheath_phi"] = c["sheath"]["y"], c["sheath"]["phi"]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp.npz"
+    np.savez(tmp, meta=np.array(json.dumps(meta)), **arrays)
+    os.replace(tmp, path)                           # 書きかけのファイルを読まないように置き換える
+
+
+def _load_cache(path):
+    with np.load(path, allow_pickle=False) as d:
+        meta = json.loads(str(d["meta"]))
+        c = {k: d[k] for k in _CACHE_ARRAYS + _CACHE_OPTIONAL if k in d.files}
+        sheath = meta.pop("sheath", None)
+        if sheath is not None:
+            sheath["y"], sheath["phi"] = d["sheath_y"], d["sheath_phi"]
+    c.update(meta, sheath=sheath)
+    return c
+
+
+def solve_circuit_cached(p, use_cache=True, log=None):
+    """solve_circuit をキャッシュ付きで呼ぶ。同じ条件の結果が CACHE_DIR にあれば読み込む (戻り値の cached=True)。
+    キャッシュが壊れていたり保存できなかったりしたら、log に理由を出して計算し直す / 保存せずに続ける。"""
+    if not use_cache:
+        return dict(solve_circuit(p), cached=False)
+    path = os.path.join(CACHE_DIR, cache_key(p) + ".npz")
+    if os.path.exists(path):
+        try:
+            return dict(_load_cache(path), cached=True)
+        except (OSError, ValueError, KeyError) as e:
+            if log is not None:
+                log(f"キャッシュを読めなかったので計算し直します ({os.path.basename(path)}: {e})")
+    c = solve_circuit(p)
+    try:
+        _save_cache(path, c)
+    except OSError as e:
+        if log is not None:
+            log(f"キャッシュを保存できませんでした ({path}: {e})")
+    return dict(c, cached=False)
 
 
 def ion_energy_sampler(c):
@@ -207,20 +281,46 @@ def ion_energy_sampler(c):
     return lambda rng, n: np.interp(rng.uniform(0, E.size, n), grid, Ep)
 
 
+def ion_velocity_sampler(c):
+    """1 次元シースで電極に着いたイオンの (面内, 法線) 速度の組から選ぶ関数 sample(rng, n) -> (vx, vy) [m/s]
+    を作る (vy は負 = ウェハに向かう)。2 次元のトレンチの計算では面内の 1 成分 vx だけを使う。"""
+    vn, vx = c["vn"], c["vx"]
+
+    def sample(rng, n):
+        k = rng.integers(0, vn.size, n)
+        return vx[k], -vn[k]
+    return sample
+
+
+def ion_angles(c):
+    """1 次元シースで電極に着いたイオンの、法線からの角度 [deg]。"""
+    return np.degrees(np.arctan2(np.hypot(c["vx"], c["vz"]), c["vn"]))
+
+
 def summary(c):
-    """ログ用の説明 (2 行)。"""
+    """ログ用の説明 (2〜3 行)。"""
     sh = c.get("sheath")
     model = (f"1 次元シース {sh['ions']} 個, {sh['seconds']:.0f} 秒" if sh is not None
              else {"transit": "通過時間で平均", "instant": "瞬時値"}[c["ied_model"]])
-    return (f"RF バイアス: 自己バイアス (ウェハの直流電位) {c['uw'].mean():.1f} V, プラズマ電位 {c['up'].mean():.1f} V, "
+    if c.get("cached"):
+        model += ", キャッシュ"
+    text = (f"RF バイアス: 自己バイアス (ウェハの直流電位) {c['uw'].mean():.1f} V, プラズマ電位 {c['up'].mean():.1f} V, "
             f"ウェハ側シース電圧 {c['V1'].min():.0f}〜{c['V1'].max():.0f} V (平均 {c['V1'].mean():.1f} V), "
             f"周期定常まで {c['n_periods']} 周期\n"
             f"  IED ({model}): {c['E'].min():.0f}〜{c['E'].max():.0f} eV (平均 {c['E'].mean():.1f} eV), "
             f"参考: Child 則のシース厚 {c['s']*1e6:.0f} μm, イオン通過時間 {c['tau_i']*1e9:.0f} ns")
+    if sh is not None and sh.get("pressure", 0) > 0:
+        th = ion_angles(c)
+        text += (f"\n  シースの衝突 (南部–北谷, {sh['pressure']:g} Pa, {sh['gas_temp']:g} K): イオン 1 個あたり "
+                 f"{sh['collisions_per_ion']:.1f} 回 (うち電荷交換 {sh['cx_fraction']*100:.0f}%, β∞ = {sh['beta_m']:.1f}), "
+                 f"入射角 平均 {th.mean():.1f}°, 5° を超える割合 {(th > 5).mean()*100:.1f}%")
+        if sh.get("beta_over", 0):
+            text += f"\n  注意: β_ex > β∞ の衝突が {sh['beta_over']} 回あり、電荷交換が少なめに数えられています"
+    return text
 
 
-def plot_circuit(c, ax_wave, ax_ied):
-    """周期定常の波形 (ax_wave) と IED (ax_ied) を描く。"""
+def plot_circuit(c, ax_wave, ax_ied, ax_iad=None):
+    """周期定常の波形 (ax_wave)、IED (ax_ied)、1 次元シースならイオンの角度分布 (ax_iad) を描く。"""
     t = c["t"] * 1e9
     colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
     ax_wave.plot(t, c["us"], color=colors[0], lw=1.5, label="RF source")
@@ -248,3 +348,14 @@ def plot_circuit(c, ax_wave, ax_ied):
              "instant": "instantaneous sheath voltage"}[c["ied_model"]]
     ax_ied.set_title(f"IED ({title})", fontsize=10)
     ax_ied.grid(alpha=0.3)
+
+    if ax_iad is not None and "vn" in c:
+        th = ion_angles(c)
+        ax_iad.hist(th, bins=np.linspace(0, max(np.percentile(th, 99.5), 1.0), 60), density=True,
+                    color=colors[2], alpha=0.85)
+        ax_iad.set_xlabel("angle from surface normal [deg]")
+        ax_iad.set_ylabel("probability density [1/deg]")
+        sh = c.get("sheath") or {}
+        gas = f"{sh['pressure']:g} Pa" if sh.get("pressure", 0) > 0 else "collisionless"
+        ax_iad.set_title(f"Ion angular distribution ({gas})", fontsize=10)
+        ax_iad.grid(alpha=0.3)

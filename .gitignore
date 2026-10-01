@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.cache/
 # シミュレーション出力 (必要なら git add -f で追加)
 *.npz
 trench_charging_fields.png

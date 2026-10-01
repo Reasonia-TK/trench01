@@ -75,9 +75,12 @@ RF = [
     ("wafer_d", "ウェハ直径", "mm", 1e-3, float),
     ("wall_ratio", "壁 / ウェハの面積比", "", 1, float),
     ("ied_model", "IED のモデル", "", 1, PC.IED_MODELS),
+    ("gas_pressure", "ガス圧力 (シースの衝突, 0=なし)", "Pa", 1, float),
+    ("gas_temp", "ガス温度", "K", 1, float),
 ]
 RF_KEYS = {f[0] for f in RF} - {"bias"}
 PULSE_KEYS = {"rf_duty", "rf_rise"}
+SHEATH_KEYS = {"gas_pressure", "gas_temp"}      # 1 次元シース (ied_model=sheath) のときだけ使う
 LEAK = [
     ("sigma_s", "表面シート伝導度 (0=なし)", "S", 1, float),
 ]
@@ -86,6 +89,7 @@ NUMERICS = [
     ("dt_batch", "1バッチの物理時間", "μs", 1e-6, float),
     ("cfl", "CFL (1ステップの移動量)", "セル", 1, float),
     ("max_steps", "粒子の最大ステップ数", "", 1, int),
+    ("wall_model", "壁際の扱い (barrier: 電位障壁で反射)", "", 1, T.WALL_MODELS),
     ("seed", "乱数シード", "", 1, int),
 ]
 FIXED_FIELDS = [
@@ -136,6 +140,8 @@ def validate(p):
         return "RF 周波数・ブロッキングコンデンサ・ウェハ直径・面積比は正の値にしてください。"
     if p.bias == "rf" and p.rf_volt < 0:
         return "RF 振幅 (パルスの高さ) は 0 以上にしてください。"
+    if p.bias == "rf" and p.ied_model == "sheath" and (p.gas_pressure < 0 or p.gas_temp <= 0):
+        return "ガス圧力は 0 以上、ガス温度は正の値にしてください。"
     if p.bias == "rf" and p.rf_wave == "pulse":
         if not 0 < p.rf_duty < 1:
             return "パルス幅は 0% より大きく 100% より小さくしてください。"
@@ -496,6 +502,9 @@ class App(tk.Tk):
                 st = "normal" if steady else "disabled"
             elif key == "mask_eps_r":
                 st = "normal" if self.vars["mask_type"].get() == "dielectric" else "disabled"
+            elif key in SHEATH_KEYS:
+                st = "normal" if (self.vars["bias"].get() == "rf"
+                                  and self.vars["ied_model"].get() == "sheath") else "disabled"
             elif key in PULSE_KEYS:
                 st = "normal" if (self.vars["bias"].get() == "rf"
                                   and self.vars["rf_wave"].get() == "pulse") else "disabled"
@@ -701,7 +710,7 @@ class App(tk.Tk):
     def _circuit_work(self, p):
         """ワーカースレッド。Tk には触らず、queue 経由で結果を渡す。"""
         try:
-            self.q.put(("circuit", PC.solve_circuit(p)))
+            self.q.put(("circuit", PC.solve_circuit_cached(p, log=lambda s: self.q.put(("log", s)))))
         except Exception:
             self.q.put(("circuit_error", traceback.format_exc()))
 
@@ -709,8 +718,9 @@ class App(tk.Tk):
         self.btn_circuit.configure(state="normal")
         win = tk.Toplevel(self)
         win.title("RF バイアスの等価回路")
-        fig = Figure(figsize=(11, 4.2), dpi=100, constrained_layout=True)
-        PC.plot_circuit(c, *fig.subplots(1, 2))
+        n = 3 if "vn" in c else 2
+        fig = Figure(figsize=(5.5 * n, 4.2), dpi=100, constrained_layout=True)
+        PC.plot_circuit(c, *fig.subplots(1, n))
         canvas = FigureCanvasTkAgg(fig, master=win)
         canvas.get_tk_widget().pack(fill="both", expand=True)
         ttk.Label(win, text=PC.summary(c), justify="left").pack(anchor="w", padx=8, pady=4)
