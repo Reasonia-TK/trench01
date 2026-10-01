@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+# シミュレーション出力 (必要なら git add -f で追加)
+*.npz
+trench_charging_fields.png
+trench_charging_history.png
+*_fields.png
+*_history.png
+!docs/*.png
