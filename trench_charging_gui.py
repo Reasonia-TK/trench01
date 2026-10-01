@@ -50,6 +50,11 @@ GEOMETRY = [
     ("eps_r", "比誘電率 (SiO2 = 3.9)", "", 1, float),
     ("top_bc", "上端の境界条件", "", 1, ("dirichlet", "neumann")),
 ]
+MASK = [
+    ("mask_t", "マスク厚 (0 = なし)", "セル", 1, int),
+    ("mask_type", "マスクの種類", "", 1, T.MASK_TYPES),
+    ("mask_eps_r", "マスクの比誘電率 (dielectric)", "", 1, float),
+]
 PLASMA = [
     ("flux", "粒子フラックス", "m⁻²s⁻¹", 1, float),
     ("ion_mass_amu", "イオン質量 (Ar = 40)", "amu", 1, float),
@@ -103,6 +108,10 @@ def validate(p):
         return "上部の真空領域は 5 セル以上にしてください。"
     if p.dx <= 0 or p.eps_r < 1:
         return "セルサイズは正、比誘電率は 1 以上にしてください。"
+    if p.mask_t < 0:
+        return "マスク厚は 0 以上にしてください。"
+    if p.mask_type == "dielectric" and p.mask_eps_r < 1:
+        return "マスクの比誘電率は 1 以上にしてください。"
     if p.flux <= 0 or p.ion_mass_amu <= 0 or p.ion_energy_eV <= 0 or p.electron_temp_eV <= 0:
         return "フラックス・イオン質量・イオンエネルギー・電子温度は正の値にしてください。"
     if p.ion_temp_eV < 0 or p.sigma_s < 0:
@@ -131,7 +140,7 @@ class LivePlot:
         self.vlines = []
         self.lines = {}
 
-    def setup(self, p, solid, i0):
+    def setup(self, p, solid, mask, i0):
         fig = self.fig
         fig.clear()
         self.p, self.solid, self.i0 = p, solid, i0
@@ -143,13 +152,12 @@ class LivePlot:
         yc = (np.arange(ny) + 0.5) * dxn
         extent = [0, nx * dxn, 0, ny * dxn]
         gs = fig.add_gridspec(2, 3, height_ratios=[1.6, 1])
-        outline = solid.T.astype(float)
 
         # (a) 電位
         ax = fig.add_subplot(gs[0, 0])
         self.im_phi = ax.imshow(np.zeros((ny, nx)), origin="lower", extent=extent,
                                 cmap="RdBu_r", vmin=-1, vmax=1)
-        ax.contour(xc, yc, outline, levels=[0.5], colors="k", linewidths=0.8)
+        T.draw_outline(ax, xc, yc, solid, mask, "k")
         fig.colorbar(self.im_phi, ax=ax, shrink=0.75)
         ax.set_title("Potential [V]", fontsize=10)
         ax.set_xlabel("x [nm]"); ax.set_ylabel("y [nm]")
@@ -160,7 +168,7 @@ class LivePlot:
         cmap.set_bad("0.85")
         self.im_E = ax.imshow(np.ma.masked_array(np.zeros((ny, nx)), mask=True), origin="lower", extent=extent,
                               cmap=cmap, vmin=0, vmax=1)
-        ax.contour(xc, yc, outline, levels=[0.5], colors="k", linewidths=0.8)
+        T.draw_outline(ax, xc, yc, solid, mask, "k")
         s = 3
         X, Y = np.meshgrid(xc[::s], yc[::s], indexing="ij")
         self.qmask = (~solid)[::s, ::s]
@@ -172,15 +180,18 @@ class LivePlot:
         ax.set_title("|E| [MV/m] and direction", fontsize=10)
         ax.set_xlabel("x [nm]"); ax.set_ylabel("y [nm]")
 
-        # (c) 左側壁プロファイル
+        # (c) 左側壁 (誘電体 + マスク) のプロファイル
         ax = fig.add_subplot(gs[0, 2])
-        self.iy = np.arange(p.floor_t, p.floor_t + p.trench_d)
+        top_ox = p.floor_t + p.trench_d
+        self.iy = np.arange(p.floor_t, top_ox + p.mask_t)
         self.yw = (self.iy + 0.5) * dxn
         (self.l_phi,) = ax.plot([], [], "r-")
         ax.set_xlabel("Potential [V]", color="r", fontsize=9)
         ax.set_ylabel("y [nm]")
         ax.set_ylim(0, ny * dxn)
         ax.grid(alpha=0.3)
+        if p.mask_t > 0:
+            T.draw_mask_level(ax, top_ox * dxn)
         ax2 = ax.twiny()
         (self.l_sig,) = ax2.plot([], [], "b--")
         ax2.set_xlabel("Surface charge [mC/m$^2$]", color="b", fontsize=9)
@@ -313,6 +324,7 @@ class App(tk.Tk):
             inner.bind(ev, wheel)
 
         self._group(inner, "形状", GEOMETRY)
+        self._group(inner, "マスク", MASK)
         self._group(inner, "プラズマ", PLASMA)
         self._group(inner, "表面リーク", LEAK)
 
@@ -353,7 +365,7 @@ class App(tk.Tk):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(14, 4), pady=1)
         if isinstance(typ, tuple):
             w = ttk.Combobox(parent, textvariable=var, values=typ, width=11, state="readonly")
-            w.bind("<<ComboboxSelected>>", self.update_info)
+            w.bind("<<ComboboxSelected>>", lambda e: self.apply_states())
         else:
             w = ttk.Entry(parent, textvariable=var, width=12, justify="right")
             w.bind("<KeyRelease>", self.update_info)
@@ -453,6 +465,8 @@ class App(tk.Tk):
                 st = "disabled" if steady else "normal"
             elif key in STEADY_KEYS:
                 st = "normal" if steady else "disabled"
+            elif key == "mask_eps_r":
+                st = "normal" if self.vars["mask_type"].get() == "dielectric" else "disabled"
             else:
                 st = "normal"
             if isinstance(w, ttk.Combobox) and st == "normal":
@@ -468,10 +482,16 @@ class App(tk.Tk):
         except ValueError:
             self.info.set("(入力値を確認してください)")
             return
-        ny = p.floor_t + p.trench_d + p.n_vac
+        ny = p.floor_t + p.trench_d + p.mask_t + p.n_vac
         lines = [f"格子 {p.nx} × {ny} セル (領域幅 {p.nx * p.dx * 1e9:.0f} nm)",
                  f"トレンチ 幅 {p.trench_w * p.dx * 1e9:.0f} nm × 深さ {p.trench_d * p.dx * 1e9:.0f} nm "
                  f"(AR = {p.trench_d / p.trench_w:.1f})"]
+        if p.mask_t > 0:
+            kind = "導体" if p.mask_type == "conductor" else f"誘電体 εr={p.mask_eps_r:g}"
+            lines.append(f"マスク {p.mask_t * p.dx * 1e9:.0f} nm ({kind}) → 開口全体の AR = "
+                         f"{(p.trench_d + p.mask_t) / p.trench_w:.1f}")
+        else:
+            lines.append("マスクなし")
         if p.ion_energy_eV > 0 and p.ion_temp_eV >= 0:
             lines.append(f"イオン角度広がり ≈ {np.degrees(np.sqrt(p.ion_temp_eV / (2 * p.ion_energy_eV))):.1f}°")
         if p.until_steady:
@@ -497,8 +517,8 @@ class App(tk.Tk):
         self.p_run, self.result = p, None
         self.stop_event = threading.Event()
         self.pending, self.last_check = None, None
-        solid, i0, _ = T.build_geometry(p)
-        self.plot.setup(p, solid, i0)
+        solid, mask, i0, _ = T.build_geometry(p)
+        self.plot.setup(p, solid, mask, i0)
         self.canvas.draw_idle()
 
         self._log("---- 実行開始 ----")
@@ -571,9 +591,12 @@ class App(tk.Tk):
         h = info["hist"]
         k = min(10, b)
         r = np.mean(h["ratio_e_bottom"][-k:]) / max(np.mean(h["ratio_i_bottom"][-k:]), 1e-9)
+        mask_s = f"マスク上面 {h['mask top'][-1]:.1f} V"
+        if "mask sidewall" in h:
+            mask_s += f" / 側壁 {h['mask sidewall'][-1]:.1f} V"
         s2 = (f"電位: 底 {h['bottom center'][-1]:.1f} V | 側壁 上 {h['sidewall upper'][-1]:.1f} / "
               f"中 {h['sidewall middle'][-1]:.1f} / 下 {h['sidewall lower'][-1]:.1f} V | "
-              f"マスク上面 {h['mask top'][-1]:.1f} V | 底の電子/イオン比 {r:.2f}")
+              f"{mask_s} | 底の電子/イオン比 {r:.2f}")
         if info["check"] is not None:
             self.last_check = info["check"]
         if p.until_steady and self.last_check is not None:

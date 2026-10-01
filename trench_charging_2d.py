@@ -10,8 +10,14 @@
 モデル
 ------
 * 2D (x: 横, y: 上向き)。奥行き方向は単位長さ(C/m などは「奥行き 1 m あたり」)。
-* 構造: 接地Si基板(y=0) の上に誘電体(SiO2, eps_r=3.9)があり、中央にトレンチ。
+* 構造: 接地Si基板(y=0) の上に誘電体(SiO2, eps_r=3.9)があり、その上にマスク(既定 300 nm)を載せる。
+        マスクと誘電体を貫く開口(トレンチ)が中央にある。マスクの開口はトレンチと同じ幅。
         x 方向は周期境界(トレンチが周期的に並ぶ)。上端は真空領域。
+* マスク: mask_type="conductor" (既定, doped carbon などの導電性マスク) は等電位の浮遊導体として扱う。
+        導体に当たった電荷は導体内を自由に動き、合計の電荷で導体の電位が決まる。
+        導体の緩和時間 (~数十 μs) は 1 バッチより短く、電荷を陽的に足すと電位が振動するため、
+        バッチ中の電子電流がボルツマン因子で電位に応答するとして半陰的に更新する (conductor_step)。
+        mask_type="dielectric" は比誘電率 mask_eps_r の誘電体。mask_t=0 でマスクなし。
 * 粒子: Monte Carlo テスト粒子。電場は凍結して 1 バッチ分の粒子を追跡
         → 表面に当たった粒子の電荷を壁面セルに蓄積
         → Poisson 方程式を解き直して電場を更新、を繰り返す。
@@ -37,6 +43,8 @@
     uv run trench_charging_2d.py --trench_d 120  # アスペクト比を変える
     uv run trench_charging_2d.py --sigma_s 1e-14 # 表面リークあり (シート伝導度 1e-14 S)
     uv run trench_charging_2d.py --until_steady  # 飽和帯電に達するまで継続 (上限 --max_batches)
+    uv run trench_charging_2d.py --mask_t 40     # マスク厚 40 セル = 200 nm (0 でマスクなし)
+    uv run trench_charging_2d.py --mask_type dielectric --mask_eps_r 3.0  # 絶縁性のマスク
     uv run trench_charging_2d.py --help          # 変更できるパラメータ一覧
 
 飽和まで継続モード (--until_steady)
@@ -65,6 +73,8 @@ EPS0 = 8.8541878128e-12      # [F/m]
 M_E = 9.1093837015e-31       # [kg]
 AMU = 1.66053906660e-27      # [kg]
 
+MASK_TYPES = ("conductor", "dielectric")  # mask_type の選択肢
+
 
 @dataclass
 class Params:
@@ -74,9 +84,13 @@ class Params:
     trench_w: int = 20        # トレンチ幅 [セル]  (20 -> 100 nm)
     trench_d: int = 80        # トレンチ深さ [セル] (80 -> 400 nm, AR=4)
     floor_t: int = 10         # トレンチ底の誘電体厚 [セル]
-    n_vac: int = 50           # トレンチ上端より上の真空領域 [セル]
+    n_vac: int = 50           # 構造の上面 (マスク上面) より上の真空領域 [セル]
     eps_r: float = 3.9        # 誘電体の比誘電率 (SiO2)
     top_bc: str = "dirichlet"  # 上端境界: "dirichlet"(phi=0, プラズマ電位) or "neumann"
+    # ---- マスク (誘電体の上に載せる。開口はトレンチと同じ幅) ----
+    mask_t: int = 60          # マスク厚 [セル] (60 -> 300 nm, 0 でマスクなし)
+    mask_type: str = "conductor"  # "conductor"(導電性: doped carbon など, 浮遊導体) or "dielectric"
+    mask_eps_r: float = 3.0   # マスクの比誘電率 (mask_type="dielectric" のときだけ使う)
     # ---- プラズマ ----
     flux: float = 1e20        # 粒子フラックス [m^-2 s^-1] (= 1e16 cm^-2 s^-1)
     ion_mass_amu: float = 40.0  # イオン質量 [amu] (Ar+)
@@ -102,28 +116,51 @@ class Params:
 
 # ---------------------------------------------------------------- 形状
 def build_geometry(p):
-    """solid[ix, iy] (True=誘電体) を作る。iy=0 が基板側。"""
-    ny = p.floor_t + p.trench_d + p.n_vac
+    """solid[ix, iy] (True=固体) と mask[ix, iy] (True=マスク, solid の一部) を作る。iy=0 が基板側。
+    誘電体 (厚さ floor_t + trench_d) の上に厚さ mask_t のマスクを載せ、
+    マスクと誘電体を貫く幅 trench_w の開口 (誘電体部分の深さ trench_d) を中央に掘る。"""
+    if p.mask_t < 0:
+        raise ValueError(f"mask_t は 0 以上にしてください: {p.mask_t}")
+    if p.mask_type not in MASK_TYPES:
+        raise ValueError(f"mask_type は {' / '.join(MASK_TYPES)} のどちらかにしてください: {p.mask_type!r}")
+    top_ox = p.floor_t + p.trench_d           # 誘電体の上面 (= マスクの下面)
+    ny = top_ox + p.mask_t + p.n_vac
     solid = np.zeros((p.nx, ny), dtype=bool)
-    solid[:, : p.floor_t + p.trench_d] = True
+    solid[:, : top_ox + p.mask_t] = True
     i0 = (p.nx - p.trench_w) // 2
     i1 = i0 + p.trench_w
-    solid[i0:i1, p.floor_t:] = False          # トレンチを掘る
-    return solid, i0, i1
+    solid[i0:i1, p.floor_t:] = False          # トレンチ (とマスクの開口) を掘る
+    mask = solid.copy()
+    mask[:, :top_ox] = False
+    return solid, mask, i0, i1
+
+
+def permittivity(solid, mask, p):
+    """セルごとの比誘電率 (真空 1, 誘電体 eps_r, 誘電体マスク mask_eps_r)。
+    導体マスクのセルの値は使わない (build_poisson で導体として扱う)。"""
+    eps = np.where(solid, p.eps_r, 1.0)
+    return np.where(mask, p.mask_eps_r, eps) if p.mask_type == "dielectric" else eps
 
 
 # ---------------------------------------------------------------- Poisson
-def build_poisson(solid, p):
-    """div(eps_r grad phi) の疎行列を作る (x: 周期, y下端: 接地, y上端: 設定による)。"""
-    nx, ny = solid.shape
+def build_poisson(eps, cond, p):
+    """div(eps_r grad phi) の疎行列を作る (x: 周期, y下端: 接地, y上端: 設定による)。
+    eps: セルごとの比誘電率, cond: 導体のセル (True)。導体と接する面は、導体表面 (= 面の位置) が
+    導体の電位になるよう 2 eps で結合する (調和平均で導体側の誘電率 -> ∞ とした極限)。
+    導体どうしの面は結合しない (導体は等電位なので make_solver で 1 つの未知数にまとめる)。"""
+    nx, ny = eps.shape
     dx2 = p.dx ** 2
-    eps = np.where(solid, p.eps_r, 1.0)
     harm = lambda a, b: 2.0 * a * b / (a + b)  # 面の誘電率 (調和平均)
 
-    ce = harm(eps, np.roll(eps, -1, axis=0)) / dx2    # 東(ix+1)側の面
-    cw = np.roll(ce, 1, axis=0)                        # 西側の面
+    def face(a, b, ca, cb):
+        """面の誘電率。片側が導体なら 2 x もう片側、両側とも導体なら 0。"""
+        h = np.where(ca, 2.0 * b, np.where(cb, 2.0 * a, harm(a, b)))
+        return np.where(ca & cb, 0.0, h)
 
-    c_int = harm(eps[:, :-1], eps[:, 1:]) / dx2        # 上下の内部面
+    ce = face(eps, np.roll(eps, -1, axis=0), cond, np.roll(cond, -1, axis=0)) / dx2  # 東(ix+1)側の面
+    cw = np.roll(ce, 1, axis=0)                                                      # 西側の面
+
+    c_int = face(eps[:, :-1], eps[:, 1:], cond[:, :-1], cond[:, 1:]) / dx2          # 上下の内部面
     cn = np.zeros((nx, ny)); cn[:, :-1] = c_int
     cs = np.zeros((nx, ny)); cs[:, 1:] = c_int
 
@@ -142,6 +179,21 @@ def build_poisson(solid, p):
     A = sps.coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
                        shape=(nx * ny, nx * ny)).tocsc()
     return A
+
+
+def make_solver(A, cond):
+    """Poisson の解法 solve(b) -> phi (全セル, 1 次元) を作る。行列は形状固定なので LU 分解は 1 回だけ。
+    導体セル (cond) は 1 つの未知数 (浮遊導体の電位) にまとめる: 全セルの電位を E @ u と書いて
+    (E^T A E) u = E^T b を解く。E^T b の導体成分は導体セルの電荷の合計なので、導体に入った電荷は
+    導体内を自由に動き、合計だけが電位を決める。b は 2 次元 (列ごとに別の右辺) でもよい。"""
+    if not cond.any():
+        return splu(A).solve
+    flat = cond.ravel()
+    n_free = int((~flat).sum())
+    col = np.where(flat, n_free, np.cumsum(~flat) - 1)    # 導体セルはすべて最後の未知数へ
+    E = sps.csr_matrix((np.ones(flat.size), (np.arange(flat.size), col)), shape=(flat.size, n_free + 1))
+    lu = splu((E.T @ A @ E).tocsc())
+    return lambda b: E @ lu.solve(E.T @ b)
 
 
 def _grad(c, m, pl, vm, vp, dx):
@@ -278,12 +330,14 @@ def surface_cells(solid):
     return solid & near
 
 
-def build_leakage(solid, lu, i0, i1, p):
+def build_leakage(solid, solve, i0, i1, p):
     """表面シート伝導度 sigma_s による表面電荷の移動(陰解法)の行列を作る。
         dQ/dt = G phi,  phi = P Q   ->   Q_new = (I - dt G P)^-1 Q_old
     G: 表面セルを 4 近傍でつないだ抵抗網のコンダクタンス行列 (g = sigma_s/dx [S/m])
-    P: 表面セルの単位電荷に対する表面セル電位の応答 (Poisson を表面セル数ぶん解いて作る)
-    G は半負定値・P は正定値なので無条件安定。G の列和が 0 なので総電荷は保存される。"""
+    P: 表面セルの単位電荷に対する表面セル電位の応答 (Poisson を表面セル数ぶん解いて作る。solve は make_solver)
+    G は半負定値・P は半正定値なので無条件安定。G の列和が 0 なので総電荷は保存される。
+    マスク表面も同じ sigma_s でつなぐ。導体マスクの表面セルどうしは等電位なので電流は流れず、
+    誘電体表面との境目で電荷が導体に出入りする。"""
     nx, ny = solid.shape
     dx = p.dx
     ix, iy = np.nonzero(surface_cells(solid))
@@ -305,13 +359,50 @@ def build_leakage(solid, lu, i0, i1, p):
     flat = ix * ny + iy
     B = np.zeros((nx * ny, m))
     B[flat, np.arange(m)] = -1.0 / (dx ** 2 * EPS0)      # 単位電荷 1 C/m を置いた右辺
-    P = lu.solve(B)[flat, :]
+    P = solve(B)[flat, :]
     M = np.linalg.inv(np.eye(m) - p.dt_batch * (G @ P))
 
     # 電流モニタ用: トレンチ中腹より下の表面セル(底 + 両側壁の下半分)
     cut = p.floor_t + p.trench_d // 2
     region = (ix >= i0 - 1) & (ix <= i1) & (iy < cut)
     return dict(flat=flat, M=M, region=region)
+
+
+# ---------------------------------------------------------------- 導電性マスク (浮遊導体)
+def conductor_response(solve, cond, dx):
+    """浮遊導体に 1 C/m を置いたときの全セルの電位 g [V/(C/m)] (nx x ny)。
+    相反定理より g[j] は「セル j に置いた 1 C/m が導体に作る電位」でもある。導体の自己容量は 1 / g[導体]。"""
+    b = np.zeros(cond.size)
+    b[np.flatnonzero(cond)[0]] = -1.0 / (dx ** 2 * EPS0)   # 導体に 1 C/m を置いた右辺
+    return solve(b).reshape(cond.shape)
+
+
+def conductor_step(n_i, n_e, q, C, Te, drift=0.0):
+    """浮遊導体の 1 バッチでの電位変化 [V] を半陰的に求める。
+    導体の緩和時間 C / (dI_e/dV) (~数十 μs) は 1 バッチより短いので、当たった電荷をそのまま足す
+    (陽解法) と電位が振動する。そこでバッチ中の電位変化 v に対して、イオン電流と drift (周りの誘電体の
+    電荷変化が導体の電位を動かす分) は一定、電子電流はボルツマン因子 exp(v/Te) で応答するとして
+        dv/dt = (q n_i / C + drift - q n_e / C exp(v/Te)) / dt_batch
+    をバッチの終わりまで厳密に積分する (w = exp(-v/Te) について線形な ODE になる)。
+    n_i, n_e: このバッチで導体に当たったイオン・電子の数 (マクロ粒子), q: マクロ粒子の電荷 [C/m],
+    C: 導体の自己容量 [F/m], Te: 電子温度 [eV], drift [V]。戻り値は drift を含む電位変化。
+    変化が 0 になる (定常) のは q (n_i - n_e) / C + drift = 0 のときで、陽解法の定常条件と同じ。"""
+    x_i, x_e = q * n_i / C + drift, q * n_e / C      # 電位を上げる/下げる 1 バッチ分の量 [V]
+    if n_e == 0:
+        return x_i
+    k = x_i / Te
+    frac = -np.expm1(-k) / k if k != 0 else 1.0      # (1 - e^-k) / k
+    return -Te * np.logaddexp(-k, np.log(x_e / Te * frac))
+
+
+def conductor_surface_charge(rho, phi, A, cond):
+    """表示・保存用の電荷密度を返す (rho のコピー)。導体セルの電荷を、等電位の条件から決まる実際の
+    分布 (導体表面の誘導電荷) に置き換える。計算中の導体の電荷は合計だけが意味を持ち、1 セルにまとめて
+    置いているため。"""
+    out = rho.copy()
+    if cond.any():
+        out[cond] = (-EPS0 * (A @ phi.ravel())).reshape(rho.shape)[cond]
+    return out
 
 
 # ---------------------------------------------------------------- 飽和判定
@@ -358,32 +449,47 @@ def run(p, log=print, progress=None, stop=None):
     stop           : is_set() が True になったら、現在のバッチ終了後に中断する (threading.Event など)
     中断した場合も、それまでの結果を返す (1 バッチも終わっていなければ None)。"""
     rng = np.random.default_rng(p.seed)
-    solid, i0, i1 = build_geometry(p)
+    solid, mask, i0, i1 = build_geometry(p)
     vac = ~solid
     nx, ny = solid.shape
     dx = p.dx
-    lu = splu(build_poisson(solid, p))
-    leak = build_leakage(solid, lu, i0, i1, p) if p.sigma_s > 0 else None
+    conductor = p.mask_type == "conductor" and mask.any()
+    cond = mask if conductor else np.zeros_like(mask)     # 導体のセル (導電性マスク)
+    A = build_poisson(permittivity(solid, mask, p), cond, p)
+    solve = make_solver(A, cond)
+    leak = build_leakage(solid, solve, i0, i1, p) if p.sigma_s > 0 else None
+    if conductor:
+        g_cond = conductor_response(solve, cond, dx)
+        C_cond = 1.0 / g_cond[cond][0]                           # 導体の自己容量 [F/m]
+        c_cell = np.flatnonzero(surface_cells(solid) & cond)[0]  # 導体の電荷をまとめて置くセル
 
     # 1 マクロ粒子が運ぶ電荷 [C/m] (奥行き 1 m あたり)
     w_real = p.flux * (nx * dx) * p.dt_batch / p.n_per_batch
     q_macro = E_CHARGE * w_real
     log(f"格子 {nx} x {ny}  (トレンチ幅 {p.trench_w*dx*1e9:.0f} nm, 深さ {p.trench_d*dx*1e9:.0f} nm, "
           f"AR={p.trench_d/p.trench_w:.1f})")
+    if p.mask_t > 0:
+        kind = f"導体 (浮遊電位, 自己容量 {C_cond*1e12:.1f} pF/m)" if conductor else f"誘電体 eps_r={p.mask_eps_r:g}"
+        log(f"マスク: 厚さ {p.mask_t*dx*1e9:.0f} nm, {kind},  開口全体の AR={(p.trench_d + p.mask_t)/p.trench_w:.1f}")
+    if conductor and leak is None:
+        log("注意: 導電性マスクで表面リークなし (sigma_s=0) だと、マスクと誘電体の境目のすぐ下の誘電体表面に"
+            "正電荷が溜まり続け、長時間では非物理的に強い電場になります。sigma_s > 0 との併用を推奨します")
     if leak is not None:
         log(f"表面リーク ON: sigma_s={p.sigma_s:g} S, 表面セル数 {leak['flat'].size}")
     log(f"1 マクロ粒子 = 実粒子 {w_real:.1f} 個/m,  1 バッチ = {p.dt_batch*1e6:.2f} μs")
 
-    # 観測点 (誘電体の表面セル)
+    # 観測点 (固体の表面セル)。側壁の上/中/下・底は誘電体部分
     iw = i0 - 1                       # 左側壁の表面セル列
-    top_y = p.floor_t + p.trench_d
-    probes = {
-        "mask top":        (i0 - 10, top_y - 1),
-        "sidewall upper":  (iw, top_y - 4),
+    top_ox = p.floor_t + p.trench_d   # 誘電体の上面 (= マスクの下面)
+    probes = {"mask top": (i0 - 10, top_ox + p.mask_t - 1)}   # マスクなしなら誘電体の上面
+    if p.mask_t > 0 and not conductor:                        # 導体マスクは等電位なので上面だけ見る
+        probes["mask sidewall"] = (iw, top_ox + p.mask_t // 2)
+    probes.update({
+        "sidewall upper":  (iw, top_ox - 4),
         "sidewall middle": (iw, p.floor_t + p.trench_d // 2),
         "sidewall lower":  (iw, p.floor_t + 3),
         "bottom center":   ((i0 + i1) // 2, p.floor_t - 1),
-    }
+    })
     hist = {"t": [], "ratio_i_bottom": [], "ratio_e_bottom": [], "esc_e": [], "lost": [], "leak": []}
     for k in probes:
         hist[k] = []
@@ -401,7 +507,11 @@ def run(p, log=print, progress=None, stop=None):
         cnt_i, cnt_e, esc, n_lost = trace(x, y, vx, vy, qm, spc, Ex, Ey, vac, p)
 
         # 電荷の蓄積 -> Poisson
-        rho += (cnt_i - cnt_e) * q_macro / dx ** 2
+        rho_prev = rho.copy() if conductor else None
+        drho = (cnt_i - cnt_e) * q_macro / dx ** 2
+        if conductor:
+            drho[cond] = 0.0                # 導体に当たった分は、下でまとめて半陰的に加える
+        rho += drho
 
         # 表面リーク: 表面セルの電荷を表面に沿って移動させる
         leak_ratio = 0.0
@@ -412,7 +522,15 @@ def run(p, log=print, progress=None, stop=None):
             dQ = Qs[leak["region"]].sum() - Qs_new[leak["region"]].sum()  # 下半分から上へ流出した正電荷
             leak_ratio = dQ / p.dt_batch / (E_CHARGE * p.flux * p.trench_w * dx)
 
-        phi = lu.solve((-rho / EPS0).ravel()).reshape(nx, ny)
+        if conductor:
+            # 導体の電位変化を半陰的に求め、それに対応する導体自身の電荷を 1 セルにまとめて置く
+            # (導体の電荷は合計だけが意味を持つ。当たった電荷との差は、電位変化で追い返された/引き込まれた電子の分)
+            drift = ((rho - rho_prev) * g_cond).sum() * dx ** 2   # ここまでの電荷変化による導体の電位変化 [V]
+            dV = conductor_step(cnt_i[cond].sum(), cnt_e[cond].sum(), q_macro, C_cond,
+                                p.electron_temp_eV, drift)
+            rho.flat[c_cell] += C_cond * (dV - drift) / dx ** 2
+
+        phi = solve((-rho / EPS0).ravel()).reshape(nx, ny)
         Ex, Ey = compute_field(phi, vac, p)
 
         # 記録
@@ -450,7 +568,8 @@ def run(p, log=print, progress=None, stop=None):
 
         if progress is not None:
             progress(dict(batch=b + 1, n_max=n_max, elapsed=time.time() - t0,
-                          phi=phi.copy(), rho=rho.copy(), Ex=Ex.copy(), Ey=Ey.copy(),
+                          phi=phi.copy(), rho=conductor_surface_charge(rho, phi, A, cond),
+                          Ex=Ex.copy(), Ey=Ey.copy(),
                           hist={k: np.array(v) for k, v in hist.items()},
                           check=check_info, converged=converged_at is not None,
                           probes=list(probes), t_conv=np.nan))
@@ -476,7 +595,8 @@ def run(p, log=print, progress=None, stop=None):
                   f"(--max_batches を増やしてください)")
     log(f"電位 (直近 {Wl} バッチ平均): " + ",  ".join(f"{k} {v:.1f} V" for k, v in steady.items()))
     t_conv = converged_at * p.dt_batch if converged_at else np.nan
-    return dict(phi=phi, rho=rho, Ex=Ex, Ey=Ey, solid=solid, i0=i0, i1=i1, hist=hist, probes=probes,
+    return dict(phi=phi, rho=conductor_surface_charge(rho, phi, A, cond), Ex=Ex, Ey=Ey,
+                solid=solid, mask=mask, i0=i0, i1=i1, hist=hist, probes=probes,
                 steady=steady, t_conv=t_conv, stopped=stopped)
 
 
@@ -491,9 +611,31 @@ def _subplots(ncols, figsize, pyplot):
     return fig, fig.subplots(1, ncols)
 
 
+def draw_outline(ax, xc, yc, solid, mask, color):
+    """固体の輪郭 (実線) とマスクの範囲 (破線) を描く。"""
+    ax.contour(xc, yc, solid.T.astype(float), levels=[0.5], colors=color, linewidths=0.8)
+    if mask.any():
+        ax.contour(xc, yc, mask.T.astype(float), levels=[0.5], colors=color, linewidths=0.8,
+                   linestyles="--")
+
+
+def draw_mask_level(ax, y):
+    """側壁プロファイルの図に、マスクの下面 (誘電体との境目) の高さ y [nm] を示す。"""
+    ax.axhline(y, color="0.5", ls="--", lw=0.8)
+    ax.text(0.02, y, " mask", transform=ax.get_yaxis_transform(), va="bottom", fontsize=8, color="0.4")
+
+
+def mask_label(p):
+    """図のタイトル用のマスクの説明。"""
+    if p.mask_t == 0:
+        return "no mask"
+    kind = "conductor" if p.mask_type == "conductor" else f"dielectric, eps_r={p.mask_eps_r:g}"
+    return f"mask {p.mask_t * p.dx * 1e9:.0f} nm ({kind})"
+
+
 def plot_results(res, p, out, pyplot=True):
     phi, rho, Ex, Ey, solid = res["phi"], res["rho"], res["Ex"], res["Ey"], res["solid"]
-    i0, hist = res["i0"], res["hist"]
+    mask, i0, hist = res["mask"], res["i0"], res["hist"]
     nx, ny = solid.shape
     dxn = p.dx * 1e9
     xc = (np.arange(nx) + 0.5) * dxn
@@ -504,14 +646,14 @@ def plot_results(res, p, out, pyplot=True):
     fig, axs = _subplots(3, (14, 7.5), pyplot)
     vmax = max(np.abs(phi).max(), 1e-9)
     im = axs[0].imshow(phi.T, origin="lower", extent=extent, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-    axs[0].contour(xc, yc, solid.T.astype(float), levels=[0.5], colors="k", linewidths=0.8)
+    draw_outline(axs[0], xc, yc, solid, mask, "k")
     axs[0].set_title("Potential [V]")
     fig.colorbar(im, ax=axs[0], shrink=0.6)
 
     vac = ~solid
     Emag = np.ma.masked_where(solid, np.hypot(Ex, Ey) / 1e6)
     im = axs[1].imshow(Emag.T, origin="lower", extent=extent, cmap="viridis")
-    axs[1].contour(xc, yc, solid.T.astype(float), levels=[0.5], colors="w", linewidths=0.8)
+    draw_outline(axs[1], xc, yc, solid, mask, "w")
     s = 3
     X, Y = np.meshgrid(xc[::s], yc[::s], indexing="ij")
     ex, ey, m = Ex[::s, ::s], Ey[::s, ::s], vac[::s, ::s]
@@ -520,8 +662,9 @@ def plot_results(res, p, out, pyplot=True):
     axs[1].set_title("|E| [MV/m] and direction")
     fig.colorbar(im, ax=axs[1], shrink=0.6)
 
-    # 左側壁の表面電位・表面電荷密度 (高さ方向)
-    iy = np.arange(p.floor_t, p.floor_t + p.trench_d)
+    # 左側壁 (誘電体 + マスク) の表面電位・表面電荷密度 (高さ方向)
+    top_ox = p.floor_t + p.trench_d
+    iy = np.arange(p.floor_t, top_ox + p.mask_t)
     iw = i0 - 1
     ax = axs[2]
     ax.plot(phi[iw, iy], (iy + 0.5) * dxn, "r-", label="surface potential [V]")
@@ -531,11 +674,14 @@ def plot_results(res, p, out, pyplot=True):
     ax2 = ax.twiny()
     ax2.plot(rho[iw, iy] * p.dx * 1e3, (iy + 0.5) * dxn, "b--", label="surface charge")
     ax2.set_xlabel("Surface charge [mC/m$^2$]", color="b")
+    if p.mask_t > 0:
+        draw_mask_level(ax, top_ox * dxn)
     ax.set_ylim(extent[2], extent[3])
     ax.grid(alpha=0.3)
     for a in axs[:2]:
         a.set_xlabel("x [nm]"); a.set_ylabel("y [nm]")
-    fig.suptitle(f"surface sheet conductance = {p.sigma_s:g} S" if p.sigma_s > 0 else "no surface leakage")
+    leak_label = f"surface sheet conductance = {p.sigma_s:g} S" if p.sigma_s > 0 else "no surface leakage"
+    fig.suptitle(f"{mask_label(p)},  {leak_label}")
     fig.tight_layout()
     fig.savefig(f"{out}_fields.png", dpi=130)
 
@@ -572,7 +718,7 @@ def save_results(res, p, out, pyplot=False):
     """図 2 枚 (<out>_fields.png, <out>_history.png) と <out>.npz を保存する。"""
     plot_results(res, p, out, pyplot=pyplot)
     np.savez(f"{out}.npz", phi=res["phi"], rho=res["rho"], Ex=res["Ex"], Ey=res["Ey"],
-             solid=res["solid"], t_conv=res["t_conv"],
+             solid=res["solid"], mask=res["mask"], t_conv=res["t_conv"],
              **{f"hist_{k}": v for k, v in res["hist"].items()},
              **{f"steady_{k}": v for k, v in res["steady"].items()})
     return [f"{out}_fields.png", f"{out}_history.png", f"{out}.npz"]
@@ -580,11 +726,12 @@ def save_results(res, p, out, pyplot=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    choices = {"mask_type": MASK_TYPES}
     for k, v in asdict(Params()).items():
         if isinstance(v, bool):
             ap.add_argument(f"--{k}", action="store_true", default=v)
         else:
-            ap.add_argument(f"--{k}", type=type(v), default=v)
+            ap.add_argument(f"--{k}", type=type(v), default=v, choices=choices.get(k))
     ap.add_argument("--out", default="trench_charging")
     ap.add_argument("--show", action="store_true", help="図をウィンドウにも表示する")
     args = vars(ap.parse_args())
