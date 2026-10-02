@@ -1,0 +1,59 @@
+{
+  "verification": {
+    "related_tests_passed": 162,
+    "calculation_tests_passed": 139,
+    "gui_tests_passed": 23,
+    "calculation_test_command": "uv run --extra cuda pytest tests/test_features.py tests/test_steady_charge.py tests/test_resume.py tests/test_cuda.py tests/test_rf_cycle.py tests/test_circuit_fast.py tests/test_taper.py -q",
+    "gui_test_command": "uv run --extra cuda pytest tests/test_gui.py -q",
+    "cli_taper_cuda_save_verified": true,
+    "gui_sizes_verified": [[1500, 920], [1150, 720]],
+    "gui_screenshot": "docs/gui_taper.png",
+    "geometry_model": "cell-center staircase on the existing Cartesian grid"
+  },
+  "zero_angle_compatibility": {
+    "source": "C:\\Works\\20261002_trench01\\お試し\\50シフト\\trench_charging.npz",
+    "source_sha256": "9c3ce78f95112d2a6f174c65ba60c525e6bd98b91b7377d42b873597d34c9af3",
+    "source_unchanged": true,
+    "start_batch": 3090,
+    "end_batch": 3120,
+    "backend": "cuda",
+    "max_abs_error_vs_previous_result": {
+      "rho_raw": 0.0,
+      "phi": 0.0,
+      "mean_phi": 0.0,
+      "Ex": 0.0,
+      "Ey": 0.0
+    },
+    "histories_equal": true,
+    "elapsed_seconds": 7.868157700053416
+  },
+  "tapered_user_settings": {
+    "settings_path": "C:\\Works\\20261002_trench01\\お試し\\trench_settings.json",
+    "settings_sha256": "168f1c15b79cdf134ef22d18bdce95d94bc6644435ba160992c0d86b11ba0386",
+    "settings_unchanged": true,
+    "trench_taper_deg": 2,
+    "mask_taper_deg": 5,
+    "field_mode": "circuit",
+    "n_batches": 2,
+    "n_per_batch": 3000,
+    "designed_width_nm": {
+      "bottom": 260.31692203300906,
+      "interface": 400.0,
+      "top": 452.49319811555443
+    },
+    "grid_bottom_width_nm": 260.0,
+    "grid_entrance_width_nm": 450.00000000000006,
+    "max_abs_cpu_cuda_difference": {
+      "rho_raw": 0.0,
+      "rho": 0.0,
+      "phi": 0.0,
+      "mean_phi": 0.0,
+      "Ex": 0.0,
+      "Ey": 0.0
+    },
+    "charge_histories_equal": true,
+    "cpu_seconds": 6.283791800029576,
+    "cuda_seconds": 6.5901318999240175,
+    "result_path": "C:\\Works\\20261002_trench01\\.cache\\taper_validation\\user_taper.npz"
+  }
+}

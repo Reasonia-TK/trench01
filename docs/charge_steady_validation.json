@@ -1,0 +1,75 @@
+{
+  "source": "C:\\Works\\20261002_trench01\\お試し\\50シフト",
+  "criterion_version": 2,
+  "original_stop_batch": 3090,
+  "original_t_conv_ms": 309.0,
+  "new_stop_in_saved_history": null,
+  "old_voltage_check_ok": true,
+  "new_charge_check": {
+    "name": "right",
+    "kind": "drift",
+    "d": 5.379740028727502e-10,
+    "tol": 5.959108829250211e-11,
+    "ratio": 9.027759322536811,
+    "rate": 1.7932466762425008e-07,
+    "unit": "C/m",
+    "ok": false
+  },
+  "loaded_converged": false,
+  "saved_data_reinterpreted_note": "保存結果の電荷は飽和していません。電位・電荷の新しい判定で再計算してください。",
+  "block_ms": 2.9999999999999996,
+  "walls": {
+    "left": {
+      "final_pC_per_m": 35662.07938868847,
+      "block_mean_change_pC_per_m": 187.14782506816283,
+      "net_charge_per_block_pC_per_m": 177.4325939761219,
+      "net_charge_tolerance_pC_per_m": 67.4210753386047,
+      "net_current_pC_per_m_per_s": 59144.19799204064
+    },
+    "right": {
+      "final_pC_per_m": 91299.08331917347,
+      "block_mean_change_pC_per_m": 537.3790062323081,
+      "net_charge_per_block_pC_per_m": 537.9740028727501,
+      "net_charge_tolerance_pC_per_m": 59.59108829250211,
+      "net_current_pC_per_m_per_s": 179324.66762425008
+    }
+  },
+  "input_sha256": {
+    "trench_settings.json": "129344de9bbed1f42dcb41a0126e5d8023e13fb8632c15401a9383d87c90f27b",
+    "trench_charging.npz": "9c3ce78f95112d2a6f174c65ba60c525e6bd98b91b7377d42b873597d34c9af3",
+    "trench_charging_charge.png": "d2cd7a7ca22da12c7ff48c68dd1beb148e1129667e06b1f686a777370737befa"
+  },
+  "cuda_run": {
+    "batches": 3120,
+    "time_ms": 312.0,
+    "elapsed_seconds": 637.1779739999911,
+    "backend": "cuda",
+    "converged": false,
+    "charge_check": {
+      "name": "right band 1",
+      "kind": "drift",
+      "d": 2.704976027227452e-10,
+      "tol": 1.2840010100351604e-11,
+      "ratio": 21.06677491751646,
+      "rate": 9.01658675742484e-08,
+      "unit": "C/m",
+      "ok": false
+    },
+    "max_charge_reproduction_error_C_per_m": 0.0,
+    "left_charge_added_after_old_stop_pC_per_m": 166.31592290266852,
+    "right_charge_added_after_old_stop_pC_per_m": 551.0475147642505
+  },
+  "source_files_unchanged": true,
+  "related_tests": {
+    "passed": 97,
+    "commands": [
+      "uv run --extra cuda pytest tests/test_steady_charge.py tests/test_features.py tests/test_gui.py tests/test_circuit_fast.py -q",
+      "uv run --extra cuda pytest tests/test_cuda.py tests/test_rf_cycle.py -q"
+    ]
+  },
+  "added_charge_check_timing": {
+    "charge_sampling_ms_per_batch": 0.01804460003040731,
+    "charge_check_ms_per_block": 2.4992790003307164,
+    "amortized_added_ms_per_batch": 0.10135390004143119
+  }
+}

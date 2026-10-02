@@ -120,7 +120,7 @@ def nk_scatter(v, rng, M, kT, beta_m):
 
 
 def ion_energies(t, V1, el, flux, ion_temp=0.0, pressure=0.0, gas_temp=300.0, ppc=200, dy_per_debye=0.25,
-                 dt_max=0.25e-9, warmup=2e-6, min_collect=1e-6, l_factor=1.5, seed=0):
+                 dt_max=0.25e-9, warmup=2e-6, min_collect=1e-6, l_factor=1.5, seed=0, engine="auto", log=None):
     """シース電圧の 1 周期分の波形 V1(t) (t: 等間隔, 周期 = t[1] * len(t)) から、電極に着いたイオンの
     エネルギー [eV] の配列、速度の dict (vn: 法線 (電極向きが正), vx, vz: 面内) [m/s]、計算条件の dict を返す。
     el: plasma_circuit.circuit_elements の dict (Te, m_i, K を使う), flux: イオンフラックス [m^-2 s^-1]
@@ -128,7 +128,18 @@ def ion_energies(t, V1, el, flux, ion_temp=0.0, pressure=0.0, gas_temp=300.0, pp
     gas_temp: 背景ガスの温度 [K], ppc: プラズマ側の 1 セルあたりのマクロ粒子数,
     dy_per_debye: 格子間隔 / デバイ長, dt_max: 時間刻みの上限 [s] (周期の 1/100 以下にもする),
     warmup: 集める前に回す時間 [s], min_collect: イオンを集める時間の下限 [s] (RF 周期の整数倍に切り上げる),
-    l_factor: 領域の長さ L = l_factor x (V1 の最大値での Child 則のシース厚) + 5 λ_D"""
+    l_factor: 領域の長さ L = l_factor x (V1 の最大値での Child 則のシース厚) + 5 λ_D,
+    engine: auto (Numba があれば CPU JIT)、numba、numpy (比較用の参照実装)。"""
+    if engine not in ("auto", "numba", "numpy"):
+        raise ValueError("シースの engine は auto / numba / numpy を指定してください")
+    simulate = None
+    if engine != "numpy":
+        try:
+            from sheath_fast import simulate
+        except ImportError:
+            if engine == "numba":
+                raise RuntimeError("Numba を利用できません。uv sync で依存関係を同期してください") from None
+    engine_used = "numba" if simulate is not None else "numpy"
     t0_wall = time.time()
     Te, M = el["Te"], el["m_i"]
     T = t[1] * t.size
@@ -196,7 +207,15 @@ def ion_energies(t, V1, el, flux, ion_temp=0.0, pressure=0.0, gas_temp=300.0, pp
     inj_rate = flux * dt / w                             # 1 ステップに入れるマクロ粒子の数 (平均)
     inj_acc = 0.0
     rec = []
-    for k in range(n_steps):
+    R = None
+    if log is not None:
+        log(f"1 次元シース: {'CPU JIT (初回はコンパイル)' if engine_used == 'numba' else 'NumPy'} / "
+            f"{N:,} セル / 初期 {n0:,} 粒子 / {n_steps:,} ステップ")
+    if simulate is not None:
+        R, n_col, n_cx, n_over = simulate(tg, Vg, phi, y, v, vx, vz, rng, Te, M, n_s, dy, dt, L, T,
+                                         w, qm, k_e, warmup, n_steps, inj_rate, u_B, v_th, P_col,
+                                         kT_gas, beta_m, E_CHARGE, NK_BETA0, NK_A)
+    for k in range(n_steps if R is None else 0):
         tk = t_start + k * dt
         # イオン密度 (CIC)
         g = y / dy
@@ -242,15 +261,18 @@ def ion_energies(t, V1, el, flux, ion_temp=0.0, pressure=0.0, gas_temp=300.0, pp
             vx = np.concatenate([vx, rng.normal(0.0, v_th, n_new)])
             vz = np.concatenate([vz, rng.normal(0.0, v_th, n_new)])
 
-    R = np.concatenate(rec) if rec else np.zeros((0, 3))
+    if R is None:
+        R = np.concatenate(rec) if rec else np.zeros((0, 3))
     n_hit = R.shape[0]
     if n_hit > MAX_STORE:                                # 記録は等しい重みなので、間引いても分布は同じ
         R = R[np.sort(rng.choice(n_hit, MAX_STORE, replace=False))]
     vel = dict(vn=R[:, 0], vx=R[:, 1], vz=R[:, 2])
     E = 0.5 * M * (R ** 2).sum(axis=1) / E_CHARGE
     info = dict(L=L, dy=dy, N=N, dt=dt, steps=n_steps, lam_D=lam_D, n_s=n_s, ions=n_hit, stored=int(E.size),
-                periods=n_collect, seconds=time.time() - t0_wall, y=y_nodes, phi=phi.copy(),
+                periods=n_collect, seconds=time.time() - t0_wall, y=y_nodes, phi=phi.copy(), engine=engine_used,
                 pressure=pressure, gas_temp=gas_temp, beta_m=beta_m,
                 collisions_per_ion=n_col / max(n_hit, 1) if pressure > 0 else 0.0,
                 cx_fraction=n_cx / max(n_col, 1), beta_over=n_over)
+    if log is not None:
+        log(f"1 次元シース IED 完了: {info['seconds']:.3f} 秒 / 到達 {n_hit:,} イオン")
     return E, vel, info

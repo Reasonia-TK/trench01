@@ -30,7 +30,7 @@ Yu et al., Plasma Sources Sci. Technol. 31, 035012 (2022) の従来型の等価�
 * イオンエネルギー分布 (IED) は ied_model で選ぶ:
     sheath (既定): ウェハ側シース電圧 V1(t) を境界条件にして、1 次元のシース (イオンは粒子、電子はボルツマン分布)
              を時間発展させ、電極に着いたイオンのエネルギーを集める (sheath_ied.py)。シースが広がる・縮む動きと、
-             イオンが電圧に追従できるかどうかを直接扱うので、パルスや中間の周波数でも使える。1 回 数〜20 秒。
+             イオンが電圧に追従できるかどうかを直接扱うので、パルスや中間の周波数でも使える。CPU JIT で計算する。
     transit: 時刻 t0 にシースへ入ったイオンのエネルギーを E(t0) = e <V1>(t0) + e Te / 2 とする近似。
              <V1> は論文のとおりシース通過時間 τ_i での平均で、一次遅れ (時定数 τ_i / 2。k 次の高調波に
              1 / (1 - i k ω τ_i / 2) を掛ける) で近似する。τ_i = 3 s sqrt(M / (2 e <V1>)) (s: 平均電圧での Child 則の
@@ -40,10 +40,12 @@ Yu et al., Plasma Sources Sci. Technol. 31, 035012 (2022) の従来型の等価�
 * キャッシュ (solve_circuit_cached): 結果を .cache/circuit/<キー>.npz に保存し、同じ条件なら読み込む。
   キーは結果に効くパラメーター (CACHE_PARAMS) と CACHE_VERSION のハッシュ。回路・IED の計算方法を
   変えたら CACHE_VERSION を上げる (古いキャッシュは使われなくなる)。
+* 瞬時電場への電位適用には include_ied=False で回路波形だけを解く。IED 付きの計算とキャッシュを区別する。
 """
 import hashlib
 import json
 import os
+import time
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -139,10 +141,12 @@ def _rhs(el, us_f, dus_f):
     return rhs
 
 
-def solve_circuit(p, n_phase=4096, max_periods=3000):
+def solve_circuit(p, n_phase=4096, max_periods=3000, sheath_engine="auto", include_ied=True, log=None):
     """RF 周期定常まで回路を解き、1 周期分の波形と IED を dict で返す。
     t: 位相 0 からの時刻 [s], us/uw/um/up: RF 電源・ウェハ・表面 (マスク)・プラズマの電位 [V],
-    V1: ウェハ側シース電圧 [V], i: 直列電流 [A], E: シースに入った時刻ごとのイオンエネルギー [eV]"""
+    V1: ウェハ側シース電圧 [V], i: 直列電流 [A], E: シースに入った時刻ごとのイオンエネルギー [eV]。
+    include_ied=False は瞬時電場用の波形だけを計算する (E は空、ied_computed=False)。"""
+    started = time.perf_counter()
     if p.ied_model not in IED_MODELS:
         raise ValueError(f"ied_model は {' / '.join(IED_MODELS)} のどちらかにしてください: {p.ied_model!r}")
     el = circuit_elements(p)
@@ -191,19 +195,25 @@ def solve_circuit(p, n_phase=4096, max_periods=3000):
     s = (4 / 3) * EPS0 * V1m / (el["K"] * (V1m + Te) ** 0.25)   # Child 則: 表面の電場 4V/(3s) = 電荷 / ε0
     tau_i = 3 * s * np.sqrt(el["m_i"] / (2 * E_CHARGE * V1m))
     sheath, vel = None, {}
-    if p.ied_model == "sheath":                     # 電極に着いたイオンのエネルギーと速度 (vn, vx, vz) の集合
-        E, vel, sheath = SH.ion_energies(t, V1, el, p.flux, p.ion_temp_eV, p.gas_pressure, p.gas_temp)
+    if log is not None:
+        log(f"RF 回路の周期定常波形: {k+1} 周期 / {time.perf_counter()-started:.3f} 秒")
+    if not include_ied:
+        E = np.empty(0)
+    elif p.ied_model == "sheath":                     # 電極に着いたイオンのエネルギーと速度 (vn, vx, vz) の集合
+        E, vel, sheath = SH.ion_energies(t, V1, el, p.flux, p.ion_temp_eV, p.gas_pressure, p.gas_temp,
+                                        engine=sheath_engine, log=log)
     elif p.ied_model == "transit":
         k_h = np.arange(n_phase // 2 + 1)
         E = np.fft.irfft(np.fft.rfft(V1) / (1 - 1j * k_h * w * tau_i / 2), n_phase) + Te / 2
     else:
         E = V1 + Te / 2
-    return dict(t=t, us=us, uw=uw, um=um, up=up, V1=V1, i=i, E=E, ied_model=p.ied_model, sheath=sheath,
+    return dict(t=t, us=us, uw=uw, um=um, up=up, V1=V1, i=i, E=E, ied_model=p.ied_model,
+                ied_computed=include_ied, sheath=sheath,
                 Ie1=_electron_current(V1, el["A1"], el), I_i1=el["J_i"] * el["A1"],
                 tau_i=tau_i, s=s, n_periods=k + 1, elements=el, **vel)
 
 
-CACHE_VERSION = 2   # 回路・IED の計算方法を変えたら上げる (2: 1 次元シースに衝突と面内速度を追加)
+CACHE_VERSION = 3   # 3: 同じ物理モデルの CPU JIT + Thomas / AGM によるシース計算
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "circuit")
 CACHE_PARAMS = ("flux", "electron_temp_eV", "ion_mass_amu", "ion_temp_eV",
                 "rf_freq", "rf_volt", "rf_wave", "rf_duty", "rf_rise", "c_block", "wafer_d", "wall_ratio",
@@ -218,16 +228,19 @@ def _key_value(v):
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
 
 
-def cache_key(p):
+def cache_key(p, include_ied=True):
     """結果に効くパラメーターと CACHE_VERSION から作るキャッシュのキー (16 進 20 文字)。"""
-    s = json.dumps({"version": CACHE_VERSION, **{k: _key_value(getattr(p, k)) for k in CACHE_PARAMS}},
-                   sort_keys=True)
+    values = {"version": CACHE_VERSION, **{k: _key_value(getattr(p, k)) for k in CACHE_PARAMS}}
+    if not include_ied:
+        values["include_ied"] = False
+    s = json.dumps(values, sort_keys=True)
     return hashlib.sha256(s.encode()).hexdigest()[:20]
 
 
 def _save_cache(path, c):
     """配列は npz、数値と dict は JSON 文字列にして保存する (読み込みに pickle を使わない)。"""
     meta = {k: c[k] for k in ("I_i1", "tau_i", "s", "n_periods", "ied_model", "elements")}
+    meta["ied_computed"] = c.get("ied_computed", True)
     arrays = {k: c[k] for k in _CACHE_ARRAYS + _CACHE_OPTIONAL if k in c}
     if c["sheath"] is not None:
         meta["sheath"] = {k: v for k, v in c["sheath"].items() if k not in ("y", "phi")}
@@ -249,19 +262,26 @@ def _load_cache(path):
     return c
 
 
-def solve_circuit_cached(p, use_cache=True, log=None):
+def solve_circuit_cached(p, use_cache=True, log=None, include_ied=True):
     """solve_circuit をキャッシュ付きで呼ぶ。同じ条件の結果が CACHE_DIR にあれば読み込む (戻り値の cached=True)。
     キャッシュが壊れていたり保存できなかったりしたら、log に理由を出して計算し直す / 保存せずに続ける。"""
     if not use_cache:
-        return dict(solve_circuit(p), cached=False)
-    path = os.path.join(CACHE_DIR, cache_key(p) + ".npz")
+        return dict(solve_circuit(p, include_ied=include_ied, log=log), cached=False)
+    path = os.path.join(CACHE_DIR, cache_key(p, include_ied) + ".npz")
+    # 完全な結果があれば、波形だけの要求にも再利用できる。逆方向の再利用はしない。
+    full_path = os.path.join(CACHE_DIR, cache_key(p) + ".npz")
+    if not include_ied and os.path.exists(full_path):
+        try:
+            return dict(_load_cache(full_path), cached=True)
+        except (OSError, ValueError, KeyError):
+            pass
     if os.path.exists(path):
         try:
             return dict(_load_cache(path), cached=True)
         except (OSError, ValueError, KeyError) as e:
             if log is not None:
                 log(f"キャッシュを読めなかったので計算し直します ({os.path.basename(path)}: {e})")
-    c = solve_circuit(p)
+    c = solve_circuit(p, include_ied=include_ied, log=log)
     try:
         _save_cache(path, c)
     except OSError as e:
@@ -274,6 +294,8 @@ def ion_energy_sampler(c):
     """IED からイオンエネルギー [eV] を選ぶ関数 sample(rng, n) を作る。
     sheath: 電極に着いたイオンのエネルギーの集合から選ぶ。transit / instant: RF の位相を一様に選んで補間する。"""
     E = c["E"]
+    if not c.get("ied_computed", True) or not E.size:
+        raise ValueError("波形のみの結果には IED がありません。include_ied=True で計算してください")
     if c["ied_model"] == "sheath":
         return lambda rng, n: E[rng.integers(0, E.size, n)]
     grid = np.arange(E.size + 1)
@@ -300,15 +322,18 @@ def ion_angles(c):
 def summary(c):
     """ログ用の説明 (2〜3 行)。"""
     sh = c.get("sheath")
-    model = (f"1 次元シース {sh['ions']} 個, {sh['seconds']:.0f} 秒" if sh is not None
+    text = (f"RF バイアス: 自己バイアス (ウェハの直流電位) {c['uw'].mean():.1f} V, プラズマ電位 {c['up'].mean():.1f} V, "
+            f"ウェハ側シース電圧 {c['V1'].min():.0f}〜{c['V1'].max():.0f} V (平均 {c['V1'].mean():.1f} V), "
+            f"周期定常まで {c['n_periods']} 周期")
+    if not c.get("ied_computed", True):
+        return text + "\n瞬時電場用の回路電位のみを計算しました (IED は使用・計算しません)" + (" / キャッシュ" if c.get("cached") else "")
+    model = (f"1 次元シース {sh['ions']} 個, {sh['seconds']:.2f} 秒, "
+             f"{'CPU JIT' if sh.get('engine') == 'numba' else 'NumPy'}" if sh is not None
              else {"transit": "通過時間で平均", "instant": "瞬時値"}[c["ied_model"]])
     if c.get("cached"):
         model += ", キャッシュ"
-    text = (f"RF バイアス: 自己バイアス (ウェハの直流電位) {c['uw'].mean():.1f} V, プラズマ電位 {c['up'].mean():.1f} V, "
-            f"ウェハ側シース電圧 {c['V1'].min():.0f}〜{c['V1'].max():.0f} V (平均 {c['V1'].mean():.1f} V), "
-            f"周期定常まで {c['n_periods']} 周期\n"
-            f"  IED ({model}): {c['E'].min():.0f}〜{c['E'].max():.0f} eV (平均 {c['E'].mean():.1f} eV), "
-            f"参考: Child 則のシース厚 {c['s']*1e6:.0f} μm, イオン通過時間 {c['tau_i']*1e9:.0f} ns")
+    text += (f"\n  IED ({model}): {c['E'].min():.0f}〜{c['E'].max():.0f} eV (平均 {c['E'].mean():.1f} eV), "
+             f"参考: Child 則のシース厚 {c['s']*1e6:.0f} μm, イオン通過時間 {c['tau_i']*1e9:.0f} ns")
     if sh is not None and sh.get("pressure", 0) > 0:
         th = ion_angles(c)
         text += (f"\n  シースの衝突 (南部–北谷, {sh['pressure']:g} Pa, {sh['gas_temp']:g} K): イオン 1 個あたり "
@@ -333,6 +358,13 @@ def plot_circuit(c, ax_wave, ax_ied, ax_iad=None):
     ax_wave.set_title("Equivalent circuit (periodic steady state)", fontsize=10)
     ax_wave.legend(fontsize=7, loc="best")
     ax_wave.grid(alpha=0.3)
+
+    if not c.get("ied_computed", True):
+        ax_ied.axis("off")
+        ax_ied.text(.5, .5, "Fixed-phase field: waveform only\nIED is not used for particle injection.\n"
+                    "Use the circuit / IED button to calculate distributions.", ha="center", va="center",
+                    transform=ax_ied.transAxes, fontsize=10)
+        return
 
     E = c["E"]
     bins = np.linspace(E.min() - 1, E.max() + 1, 60)

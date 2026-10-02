@@ -1,0 +1,188 @@
+{
+  "config": "trench_settings.json",
+  "config_sha256": "168f1c15b79cdf134ef22d18bdce95d94bc6644435ba160992c0d86b11ba0386",
+  "params": {
+    "dx": 5e-09,
+    "nx": 120,
+    "trench_w": 80,
+    "trench_offset": 0,
+    "trench_d": 400,
+    "floor_t": 50,
+    "n_vac": 50,
+    "eps_r": 3.9,
+    "top_bc": "dirichlet",
+    "mask_t": 60,
+    "mask_type": "conductor",
+    "mask_eps_r": 3.0,
+    "field_mode": "circuit",
+    "rf_phase": 0.0,
+    "substrate_voltage": 0.0,
+    "mask_voltage": 0.0,
+    "top_voltage": 0.0,
+    "side_bc": "pillar",
+    "left_voltage": 0.0,
+    "right_voltage": 0.0,
+    "probe_ions": 100,
+    "probe_energy_eV": 5000.0,
+    "probe_trajectories": 40,
+    "flux": 1e+20,
+    "ion_mass_amu": 40.0,
+    "ion_energy_eV": 100.0,
+    "ion_temp_eV": 0.05,
+    "electron_temp_eV": 3.0,
+    "bias": "rf",
+    "rf_freq": 400000.0,
+    "rf_volt": 5000.0,
+    "rf_wave": "pulse",
+    "rf_duty": 0.2,
+    "rf_rise": 1e-08,
+    "c_block": 4.9e-09,
+    "wafer_d": 0.3,
+    "wall_ratio": 5.0,
+    "ied_model": "sheath",
+    "gas_pressure": 1.0,
+    "gas_temp": 300.0,
+    "sigma_s": 1e-15,
+    "until_steady": true,
+    "max_batches": 3000,
+    "steady_window": 30,
+    "steady_rtol": 0.005,
+    "steady_hold": 2,
+    "backend": "cuda",
+    "cuda_device": 0,
+    "n_batches": 300,
+    "n_per_batch": 3000,
+    "dt_batch": 9.999999999999999e-05,
+    "cfl": 0.35,
+    "max_steps": 10000,
+    "wall_model": "barrier",
+    "seed": 1
+  },
+  "environment": {
+    "python": "3.12.14",
+    "numpy": "2.5.3",
+    "numba": "0.68.0",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cpu": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD"
+  },
+  "cache_used": false,
+  "reference_seconds": 190.20287419995293,
+  "jit_process_first_seconds": 25.639212299953215,
+  "jit_warm_seconds": [
+    24.67490799992811,
+    24.223489900003187
+  ],
+  "jit_median_seconds": 24.44919894996565,
+  "full_ied_speedup": 7.779513536995459,
+  "waveform_only_seconds": 0.09979100001510233,
+  "waveform_only_max_V1_difference": 0.0,
+  "waveform_max_difference": {
+    "V1": 0.0,
+    "us": 0.0,
+    "uw": 0.0,
+    "um": 0.0,
+    "up": 0.0,
+    "i": 0.0
+  },
+  "reference_sheath": {
+    "N": 1254,
+    "dt": 2.5e-10,
+    "steps": 18000,
+    "ions": 91799,
+    "stored": 91799,
+    "periods": 1,
+    "collisions_per_ion": 310.12771380951864,
+    "cx_fraction": 0.005869281327673271,
+    "beta_over": 0
+  },
+  "jit_sheath": {
+    "N": 1254,
+    "dt": 2.5e-10,
+    "steps": 18000,
+    "ions": 91818,
+    "stored": 91818,
+    "periods": 1,
+    "collisions_per_ion": 310.0159119126969,
+    "cx_fraction": 0.005874082528108777,
+    "beta_over": 0
+  },
+  "energy_mean_relative_difference": 0.0002205082442886448,
+  "distributions": {
+    "E": {
+      "reference_mean": 2583.1667343532017,
+      "jit_mean": 2582.5971247919047,
+      "cdf_max_difference": 0.0009861802897260692,
+      "reference_quantiles": [
+        22.385406543610088,
+        2775.904818940527,
+        4633.518711498555
+      ],
+      "jit_quantiles": [
+        22.25042967780376,
+        2775.377269280162,
+        4633.5137574596865
+      ]
+    },
+    "vn": {
+      "reference_mean": 102994.26349662962,
+      "jit_mean": 102969.65814581094,
+      "cdf_max_difference": 0.0010644457550888099,
+      "reference_quantiles": [
+        10342.881446353817,
+        115676.81488621687,
+        149507.18365183886
+      ],
+      "jit_quantiles": [
+        10293.202099064149,
+        115660.75422346946,
+        149506.96954933123
+      ]
+    },
+    "vx": {
+      "reference_mean": 4.157414062407985,
+      "jit_mean": 3.0004579768703556,
+      "cdf_max_difference": 0.0012585542743357436,
+      "reference_quantiles": [
+        -662.1022968418846,
+        1.5176168934871608,
+        664.9970182593253
+      ],
+      "jit_quantiles": [
+        -664.3277141058801,
+        1.2225818063773057,
+        664.2861367284795
+      ]
+    },
+    "vz": {
+      "reference_mean": 1.2508982735328218,
+      "jit_mean": 1.522299446358511,
+      "cdf_max_difference": 0.0006278405745298032,
+      "reference_quantiles": [
+        -659.3248378470776,
+        1.4112490306936387,
+        668.2659924262651
+      ],
+      "jit_quantiles": [
+        -657.8521024600998,
+        1.489496237398153,
+        669.0169663746749
+      ]
+    },
+    "angle_deg": {
+      "reference_mean": 0.7481988566553309,
+      "jit_mean": 0.7502779219106984,
+      "cdf_max_difference": 0.0009668079011624364,
+      "reference_quantiles": [
+        0.05148437523538225,
+        0.21454505001130197,
+        2.67323955734584
+      ],
+      "jit_quantiles": [
+        0.05150140613072367,
+        0.21460579455005951,
+        2.722019091909805
+      ]
+    }
+  },
+  "notes": "倍精度・粒子数・格子・時間刻み・Newton 許容値は同じ。衝突を含む分布は丸め誤差により乱数消費が変わる場合があり、ビット一致ではなく分布を比較。プロセス内初回は既存 JIT ディスクキャッシュを利用する場合がある。"
+}

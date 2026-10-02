@@ -1,0 +1,30 @@
+{
+  "source": "C:\\Works\\20261002_trench01\\お試し\\50シフト\\trench_charging.npz",
+  "source_sha256": "9c3ce78f95112d2a6f174c65ba60c525e6bd98b91b7377d42b873597d34c9af3",
+  "source_unchanged": true,
+  "start_batch": 3090,
+  "end_batch": 3120,
+  "start_time_ms": 309.0,
+  "end_time_ms": 312.0,
+  "particle_batches_executed": 30,
+  "elapsed_seconds": 12.397572200046852,
+  "backend": "cuda",
+  "legacy_rng_reconstructed": true,
+  "continuous_reference": "C:\\Works\\20261002_trench01\\.cache\\charge_steady\\continued.npz",
+  "max_abs_error_vs_continuous": {
+    "rho_raw": 0.0,
+    "phi": 0.0,
+    "mean_phi": 0.0,
+    "Ex": 0.0,
+    "Ey": 0.0
+  },
+  "histories_equal": true,
+  "checkpoint_round_trip_equal": true,
+  "checkpoint_version": 1,
+  "result_path": "C:\\Works\\20261002_trench01\\.cache\\resume_validation\\continued.npz",
+  "related_tests": {
+    "passed": 124,
+    "command": "uv run --extra cuda pytest tests/test_resume.py tests/test_steady_charge.py tests/test_features.py tests/test_cuda.py tests/test_rf_cycle.py tests/test_gui.py tests/test_circuit_fast.py -q"
+  },
+  "gui_render_sizes": ["1500x920", "1150x720"]
+}

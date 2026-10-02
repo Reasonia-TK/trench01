@@ -42,7 +42,10 @@ def test_bitwise_identical_to_baseline(name):
     with np.load(DATA / f"{name}.npz") as d:
         base = {k: d[k] for k in d.files}
     new = result_arrays(baseline_params(CASES[name]))
-    assert set(new) == set(base), f"基準データとキーが違います: {sorted(set(new) ^ set(base))}"
+    # 左右の観測値は追加機能。初版の全配列を引き続きビット単位で照合する。
+    added = {f"{prefix}_right sidewall {level}" for prefix in ("hist", "steady")
+             for level in ("upper", "middle", "lower")}
+    assert set(new) == set(base) | added, f"基準データと追加観測値のキーが違います: {sorted(set(new) ^ (set(base) | added))}"
     bad = [k for k in base if not np.array_equal(base[k], new[k], equal_nan=True)]
     assert not bad, f"基準データと一致しません: {bad}"
 
